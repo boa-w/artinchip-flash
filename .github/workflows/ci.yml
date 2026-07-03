@@ -58,16 +58,20 @@ jobs:
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
           @"
           <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-            <Package Name="aic-flash" Manufacturer="boa-w" Version="$version" UpgradeCode="{6E258C67-9E5F-48FD-BE41-4F53565B76ED}" Scope="perMachine">
+            <Package Name="aic-flash ArtInChip Flasher" Manufacturer="boa-w" Version="$version" UpgradeCode="{6E258C67-9E5F-48FD-BE41-4F53565B76ED}" Scope="perMachine">
               <MajorUpgrade DowngradeErrorMessage="A newer version of aic-flash is already installed." />
               <MediaTemplate EmbedCab="yes" />
+              <Property Id="ARPCOMMENTS" Value="Cross-platform CLI and GUI flasher for ArtInChip SoCs." />
+              <Property Id="ARPCONTACT" Value="boa-w" />
+              <Property Id="ARPURLINFOABOUT" Value="https://github.com/boa-w/aic-flash" />
+              <Property Id="ARPNOMODIFY" Value="1" />
 
               <StandardDirectory Id="ProgramFilesFolder">
                 <Directory Id="INSTALLFOLDER" Name="aic-flash" />
               </StandardDirectory>
 
               <StandardDirectory Id="ProgramMenuFolder">
-                <Directory Id="ApplicationProgramsFolder" Name="aic-flash" />
+                <Directory Id="ApplicationProgramsFolder" Name="aic-flash ArtInChip Flasher" />
               </StandardDirectory>
 
               <Feature Id="Main" Title="aic-flash" Level="1">
@@ -92,7 +96,7 @@ jobs:
               <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="*">
                 <Shortcut Id="AicFlashGuiShortcut" Name="aic-flash GUI" Target="[INSTALLFOLDER]aic-flash-gui.exe" WorkingDirectory="INSTALLFOLDER" />
                 <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
-                <RegistryValue Root="HKCU" Key="Software\aic-flash" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+                <RegistryValue Root="HKLM" Key="Software\boa-w\aic-flash" Name="installed" Type="integer" Value="1" KeyPath="yes" />
               </Component>
             </Package>
           </Wix>

@@ -39,7 +39,9 @@ The GUI binary is placed at `target/release/aic-flash-gui`.
 Nightly builds publish both portable archives and native installers:
 
 - Windows: `aic-flash-windows-x64.msi` installs the CLI, GUI, README, and a
-  Start Menu shortcut. `aic-flash-windows-x64.zip` is the portable package.
+  Start Menu shortcut. It appears in Windows Apps/Programs as
+  `aic-flash ArtInChip Flasher`. `aic-flash-windows-x64.zip` is the portable
+  package.
 - macOS: `aic-flash-macos-arm64.pkg` installs `aic-flash-gui.app` to
   `/Applications` and the CLI to `/usr/local/bin/aic-flash`.
   `aic-flash-macos-arm64.tar.gz` is the portable package.
