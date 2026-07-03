@@ -56,18 +56,6 @@ jobs:
 
           dotnet tool install --global wix --version 5.0.2
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          wix extension add -g WixToolset.UI.wixext
-          @"
-          {\rtf1\ansi\deff0
-          {\fonttbl{\f0 Segoe UI;}}
-          \f0\fs18
-          aic-flash ArtInChip Flasher\par
-          \par
-          This installer installs the aic-flash command-line tool and graphical flashing application.\par
-          \par
-          After installation completes, click Finish to close the setup wizard.\par
-          }
-          "@ | Set-Content -Path license.rtf -Encoding ASCII
           @"
           <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
             <Package Name="aic-flash ArtInChip Flasher" Manufacturer="boa-w" Version="$version" UpgradeCode="{6E258C67-9E5F-48FD-BE41-4F53565B76ED}" Scope="perMachine">
@@ -77,11 +65,6 @@ jobs:
               <Property Id="ARPCONTACT" Value="boa-w" />
               <Property Id="ARPURLINFOABOUT" Value="https://github.com/boa-w/aic-flash" />
               <Property Id="ARPNOMODIFY" Value="1" />
-              <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="aic-flash has been installed successfully. Click Finish to close this setup wizard." />
-              <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
-              <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
-              <UIRef Id="WixUI_InstallDir" />
-              <UIRef Id="WixUI_ErrorProgressText" />
 
               <StandardDirectory Id="ProgramFilesFolder">
                 <Directory Id="INSTALLFOLDER" Name="aic-flash" />
@@ -118,8 +101,51 @@ jobs:
             </Package>
           </Wix>
           "@ | Set-Content -Path installer.wxs -Encoding UTF8
-          wix build installer.wxs -ext WixToolset.UI.wixext -culture zh-CN -o "packages/aic-flash-$system.msi"
+          wix build installer.wxs -o "packages/aic-flash-$system.msi"
           Remove-Item -Path packages/*.wixpdb -ErrorAction SilentlyContinue
+
+          choco install innosetup --no-progress -y
+          @"
+          #define AppName "aic-flash ArtInChip Flasher"
+          #define AppVersion "$version"
+
+          [Setup]
+          AppId={{6E258C67-9E5F-48FD-BE41-4F53565B76ED}
+          AppName={#AppName}
+          AppVersion={#AppVersion}
+          AppPublisher=boa-w
+          AppPublisherURL=https://github.com/boa-w/aic-flash
+          AppSupportURL=https://github.com/boa-w/aic-flash
+          AppUpdatesURL=https://github.com/boa-w/aic-flash/releases/tag/nightly
+          DefaultDirName={autopf}\aic-flash
+          DefaultGroupName=aic-flash ArtInChip Flasher
+          DisableProgramGroupPage=yes
+          OutputDir=packages
+          OutputBaseFilename=aic-flash-$system-setup
+          Compression=lzma
+          SolidCompression=yes
+          WizardStyle=modern
+          PrivilegesRequired=admin
+          UninstallDisplayName=aic-flash ArtInChip Flasher
+
+          [Files]
+          Source: "target\release\aic-flash.exe"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "target\release\aic-flash-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{group}\aic-flash GUI"; Filename: "{app}\aic-flash-gui.exe"; WorkingDir: "{app}"
+          Name: "{group}\aic-flash CLI"; Filename: "{app}\aic-flash.exe"; WorkingDir: "{app}"
+
+          [Run]
+          Filename: "{app}\aic-flash-gui.exe"; Description: "Launch aic-flash GUI"; Flags: nowait postinstall skipifsilent unchecked
+          "@ | Set-Content -Path installer.iss -Encoding UTF8
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+            & $iscc installer.iss
+          } else {
+            iscc installer.iss
+          }
 
       - name: Package Linux artifacts
         if: runner.os == 'Linux'
