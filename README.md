@@ -34,6 +34,22 @@ The GUI binary is placed at `target/release/aic-flash-gui`.
 
 [Rust]: https://rustup.rs
 
+## Installers
+
+Nightly builds publish both portable archives and native installers:
+
+- Windows: `aic-flash-windows-x64.msi` installs the CLI, GUI, README, and a
+  Start Menu shortcut. `aic-flash-windows-x64.zip` is the portable package.
+- macOS: `aic-flash-macos-arm64.pkg` installs `aic-flash-gui.app` to
+  `/Applications` and the CLI to `/usr/local/bin/aic-flash`.
+  `aic-flash-macos-arm64.tar.gz` is the portable package.
+- Linux: `aic-flash-linux-x64.deb` installs the CLI/GUI to `/usr/bin`, adds a
+  desktop entry, and installs the udev rule for `33c3:6677`.
+  `aic-flash-linux-x64.tar.gz` is the portable package.
+
+Unsigned macOS and Windows installers may show the normal first-run security
+prompt until signing/notarization is configured.
+
 ## Usage
 
 ```

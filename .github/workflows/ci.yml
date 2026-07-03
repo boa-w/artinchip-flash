@@ -46,42 +46,176 @@ jobs:
         run: |
           $system = "windows-$($env:RUNNER_ARCH.ToLower())"
           $archive = "aic-flash-$system.zip"
-          New-Item -ItemType Directory -Force dist | Out-Null
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          New-Item -ItemType Directory -Force packages, dist | Out-Null
+
           Copy-Item target/release/aic-flash.exe "dist/aic-flash-$system.exe"
           Copy-Item target/release/aic-flash-gui.exe "dist/aic-flash-gui-$system.exe"
           Copy-Item README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath $archive -Force
-          "PACKAGE_FILE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Compress-Archive -Path dist/* -DestinationPath "packages/$archive" -Force
+
+          dotnet tool install --global wix --version 5.0.2
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          @"
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="aic-flash" Manufacturer="boa-w" Version="$version" UpgradeCode="{6E258C67-9E5F-48FD-BE41-4F53565B76ED}" Scope="perMachine">
+              <MajorUpgrade DowngradeErrorMessage="A newer version of aic-flash is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+
+              <StandardDirectory Id="ProgramFilesFolder">
+                <Directory Id="INSTALLFOLDER" Name="aic-flash" />
+              </StandardDirectory>
+
+              <StandardDirectory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="aic-flash" />
+              </StandardDirectory>
+
+              <Feature Id="Main" Title="aic-flash" Level="1">
+                <ComponentRef Id="CliExe" />
+                <ComponentRef Id="GuiExe" />
+                <ComponentRef Id="ReadmeFile" />
+                <ComponentRef Id="StartMenuShortcut" />
+              </Feature>
+
+              <Component Id="CliExe" Directory="INSTALLFOLDER" Guid="*">
+                <File Id="CliFile" Source="target\release\aic-flash.exe" Name="aic-flash.exe" KeyPath="yes" />
+              </Component>
+
+              <Component Id="GuiExe" Directory="INSTALLFOLDER" Guid="*">
+                <File Id="GuiFile" Source="target\release\aic-flash-gui.exe" Name="aic-flash-gui.exe" KeyPath="yes" />
+              </Component>
+
+              <Component Id="ReadmeFile" Directory="INSTALLFOLDER" Guid="*">
+                <File Id="Readme" Source="README.md" Name="README.md" KeyPath="yes" />
+              </Component>
+
+              <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="*">
+                <Shortcut Id="AicFlashGuiShortcut" Name="aic-flash GUI" Target="[INSTALLFOLDER]aic-flash-gui.exe" WorkingDirectory="INSTALLFOLDER" />
+                <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\aic-flash" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+              </Component>
+            </Package>
+          </Wix>
+          "@ | Set-Content -Path installer.wxs -Encoding UTF8
+          wix build installer.wxs -o "packages/aic-flash-$system.msi"
 
       - name: Package Linux artifacts
         if: runner.os == 'Linux'
         run: |
           system="$(printf '%s-%s' "$RUNNER_OS" "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           archive="aic-flash-${system}.tar.gz"
-          mkdir -p dist
+          version="$(awk -F\" '/^version =/ { print $2; exit }' Cargo.toml)"
+          case "$RUNNER_ARCH" in
+            X64) deb_arch="amd64" ;;
+            ARM64) deb_arch="arm64" ;;
+            *) deb_arch="$(dpkg --print-architecture)" ;;
+          esac
+          mkdir -p packages dist
           cp target/release/aic-flash "dist/aic-flash-${system}"
           cp target/release/aic-flash-gui "dist/aic-flash-gui-${system}"
           cp README.md dist/
-          tar -czf "$archive" -C dist .
-          echo "PACKAGE_FILE=$archive" >> "$GITHUB_ENV"
+          tar -czf "packages/$archive" -C dist .
+
+          pkgroot="deb-root"
+          mkdir -p "$pkgroot/DEBIAN" "$pkgroot/usr/bin" "$pkgroot/usr/share/applications" "$pkgroot/usr/share/doc/aic-flash" "$pkgroot/usr/lib/udev/rules.d"
+          install -m 0755 target/release/aic-flash "$pkgroot/usr/bin/aic-flash"
+          install -m 0755 target/release/aic-flash-gui "$pkgroot/usr/bin/aic-flash-gui"
+          install -m 0644 README.md "$pkgroot/usr/share/doc/aic-flash/README.md"
+          cat > "$pkgroot/usr/share/applications/aic-flash-gui.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=aic-flash GUI
+          Comment=ArtInChip firmware flashing tool
+          Exec=aic-flash-gui
+          Terminal=false
+          Categories=Utility;Development;
+          EOF
+          cat > "$pkgroot/usr/lib/udev/rules.d/99-aic-flash.rules" <<'EOF'
+          SUBSYSTEM=="usb", ATTR{idVendor}=="33c3", ATTR{idProduct}=="6677", TAG+="uaccess", MODE="0666"
+          EOF
+          cat > "$pkgroot/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          set -e
+          if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger || true
+          fi
+          exit 0
+          EOF
+          cat > "$pkgroot/DEBIAN/postrm" <<'EOF'
+          #!/bin/sh
+          set -e
+          if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+          fi
+          exit 0
+          EOF
+          chmod 0755 "$pkgroot/DEBIAN/postinst" "$pkgroot/DEBIAN/postrm"
+          installed_size="$(du -sk "$pkgroot" | cut -f1)"
+          cat > "$pkgroot/DEBIAN/control" <<EOF
+          Package: aic-flash
+          Version: $version
+          Section: utils
+          Priority: optional
+          Architecture: $deb_arch
+          Installed-Size: $installed_size
+          Maintainer: boa-w
+          Depends: libc6, libusb-1.0-0, libudev1, libx11-6, libxi6, libxcursor1, libxrandr2, libxinerama1, libxkbcommon0, libgl1
+          Description: ArtInChip firmware flashing tool
+           Cross-platform CLI and GUI flasher for ArtInChip SoCs.
+          EOF
+          dpkg-deb --build "$pkgroot" "packages/aic-flash-${system}.deb"
 
       - name: Package macOS artifacts
         if: runner.os == 'macOS'
         run: |
           system="$(printf '%s-%s' "$RUNNER_OS" "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
           archive="aic-flash-${system}.tar.gz"
-          mkdir -p dist
+          version="$(awk -F\" '/^version =/ { print $2; exit }' Cargo.toml)"
+          mkdir -p packages dist
           cp target/release/aic-flash "dist/aic-flash-${system}"
           cp target/release/aic-flash-gui "dist/aic-flash-gui-${system}"
           cp README.md dist/
-          tar -czf "$archive" -C dist .
-          echo "PACKAGE_FILE=$archive" >> "$GITHUB_ENV"
+          tar -czf "packages/$archive" -C dist .
+
+          pkgroot="pkg-root"
+          app="$pkgroot/Applications/aic-flash-gui.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$pkgroot/usr/local/bin"
+          install -m 0755 target/release/aic-flash "$pkgroot/usr/local/bin/aic-flash"
+          install -m 0755 target/release/aic-flash-gui "$app/Contents/MacOS/aic-flash-gui"
+          cat > "$app/Contents/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>aic-flash GUI</string>
+            <key>CFBundleExecutable</key>
+            <string>aic-flash-gui</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.boaw.aic-flash-gui</string>
+            <key>CFBundleName</key>
+            <string>aic-flash-gui</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.1.0</string>
+            <key>CFBundleVersion</key>
+            <string>0.1.0</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+          </dict>
+          </plist>
+          EOF
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$app/Contents/Info.plist"
+          pkgbuild --root "$pkgroot" --identifier "com.boaw.aic-flash" --version "$version" --install-location / "packages/aic-flash-${system}.pkg"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PACKAGE_FILE }}
-          path: ${{ env.PACKAGE_FILE }}
+          name: aic-flash-${{ runner.os }}-${{ runner.arch }}-packages
+          path: packages/*
           if-no-files-found: error
 
   nightly:
@@ -156,7 +290,7 @@ jobs:
             const body = [
               `Automated nightly build from \`${context.sha}\`.`,
               '',
-              'Assets are named as `aic-flash-<system>` and include both CLI and GUI binaries.',
+              'Portable archives and native installers are named as `aic-flash-<system>`.',
             ].join('\n');
 
             let release;

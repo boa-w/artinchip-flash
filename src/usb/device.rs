@@ -1631,11 +1631,6 @@ fn macos_not_ready_status(configured: bool, has_interface: bool) -> Option<Strin
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn macos_not_ready_status(_configured: bool, _has_interface: bool) -> Option<String> {
-    None
-}
-
 #[cfg(target_os = "macos")]
 fn find_macos_aic_device_block(text: &str, address: u8) -> Option<String> {
     let mut current = String::new();
@@ -1751,11 +1746,11 @@ fn platform_config_dir() -> PathBuf {
     std::env::temp_dir().join("aic-flash")
 }
 
-fn format_usb_open_error(err: rusb::Error, address: u8) -> String {
+fn format_usb_open_error(err: rusb::Error, _address: u8) -> String {
     #[cfg(target_os = "macos")]
     {
         if err == rusb::Error::Other {
-            let state = macos_check_device_ready(address)
+            let state = macos_check_device_ready(_address)
                 .err()
                 .map(|reason| format!("; IOKit state: {}", reason))
                 .unwrap_or_default();
