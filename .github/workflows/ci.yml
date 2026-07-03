@@ -69,7 +69,7 @@ jobs:
           }
           "@ | Set-Content -Path license.rtf -Encoding ASCII
           @"
-          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
             <Package Name="aic-flash ArtInChip Flasher" Manufacturer="boa-w" Version="$version" UpgradeCode="{6E258C67-9E5F-48FD-BE41-4F53565B76ED}" Scope="perMachine">
               <MajorUpgrade DowngradeErrorMessage="A newer version of aic-flash is already installed." />
               <MediaTemplate EmbedCab="yes" />
@@ -78,8 +78,10 @@ jobs:
               <Property Id="ARPURLINFOABOUT" Value="https://github.com/boa-w/aic-flash" />
               <Property Id="ARPNOMODIFY" Value="1" />
               <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="aic-flash has been installed successfully. Click Finish to close this setup wizard." />
+              <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
               <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
-              <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+              <UIRef Id="WixUI_InstallDir" />
+              <UIRef Id="WixUI_ErrorProgressText" />
 
               <StandardDirectory Id="ProgramFilesFolder">
                 <Directory Id="INSTALLFOLDER" Name="aic-flash" />
