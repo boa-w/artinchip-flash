@@ -98,6 +98,7 @@ jobs:
           </Wix>
           "@ | Set-Content -Path installer.wxs -Encoding UTF8
           wix build installer.wxs -o "packages/aic-flash-$system.msi"
+          Remove-Item -Path packages/*.wixpdb -ErrorAction SilentlyContinue
 
       - name: Package Linux artifacts
         if: runner.os == 'Linux'
