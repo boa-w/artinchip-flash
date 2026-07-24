@@ -46,9 +46,11 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn load_default() -> Self {
         let cfg = Self::default();
+        let _ = standalone::migrate_legacy_app_data();
         let project_ini = standalone::config_path();
         if project_ini.exists() {
-            if let Ok(loaded) = Self::load_from(&project_ini) {
+            if let Ok(mut loaded) = Self::load_from(&project_ini) {
+                loaded.app_dir = cfg.app_dir;
                 return loaded;
             }
         }
@@ -319,7 +321,7 @@ mod tests {
     #[test]
     fn saves_and_loads_project_paths() {
         let unique = format!(
-            "aic-flash-test-{}",
+            "artinchip-flash-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

@@ -1688,7 +1688,7 @@ impl UsbAccessLock {
                 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(format!(
-                "Another aic-flash instance is using the ArtInChip USB device{} Close the other CLI/GUI instance and retry. Lock: {}",
+                "Another artinchip-flash instance is using the ArtInChip USB device{} Close the other CLI/GUI instance and retry. Lock: {}",
                 lock_owner_hint(&path),
                 path.display()
             )),
@@ -1712,38 +1712,11 @@ fn usb_access_lock_path() -> Result<PathBuf, String> {
     let dir = platform_config_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create '{}': {}", dir.display(), e))?;
-    Ok(dir.join("aic-flash-usb-33c3-6677.lock"))
+    Ok(dir.join("artinchip-flash-usb-33c3-6677.lock"))
 }
 
 fn platform_config_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("aic-flash");
-        }
-        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-            return PathBuf::from(userprofile).join(".aic-flash");
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("aic-flash");
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg).join("aic-flash");
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(".config").join("aic-flash");
-        }
-    }
-    std::env::temp_dir().join("aic-flash")
+    crate::standalone::default_app_dir()
 }
 
 fn format_usb_open_error(err: rusb::Error, _address: u8) -> String {
@@ -1755,7 +1728,7 @@ fn format_usb_open_error(err: rusb::Error, _address: u8) -> String {
                 .map(|reason| format!("; IOKit state: {}", reason))
                 .unwrap_or_default();
             return format!(
-                "Other error (macOS IOKit refused USBDeviceOpen{}; close other aic-flash/AiBurn instances, then unplug and reconnect the board)",
+                "Other error (macOS IOKit refused USBDeviceOpen{}; close other artinchip-flash/AiBurn instances, then unplug and reconnect the board)",
                 state
             );
         }

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>artinchip-flash</title>
+  <rect x="64" y="64" width="896" height="896" rx="192" fill="#171a1f"/>
+  <g fill="#f4f6f8">
+    <rect x="205" y="304" width="92" height="44" rx="16"/>
+    <rect x="205" y="422" width="92" height="44" rx="16"/>
+    <rect x="205" y="540" width="92" height="44" rx="16"/>
+    <rect x="205" y="658" width="92" height="44" rx="16"/>
+    <rect x="727" y="304" width="92" height="44" rx="16"/>
+    <rect x="727" y="422" width="92" height="44" rx="16"/>
+    <rect x="727" y="540" width="92" height="44" rx="16"/>
+    <rect x="727" y="658" width="92" height="44" rx="16"/>
+    <rect x="304" y="205" width="44" height="92" rx="16"/>
+    <rect x="422" y="205" width="44" height="92" rx="16"/>
+    <rect x="540" y="205" width="44" height="92" rx="16"/>
+    <rect x="658" y="205" width="44" height="92" rx="16"/>
+    <rect x="304" y="727" width="44" height="92" rx="16"/>
+    <rect x="422" y="727" width="44" height="92" rx="16"/>
+    <rect x="540" y="727" width="44" height="92" rx="16"/>
+    <rect x="658" y="727" width="44" height="92" rx="16"/>
+  </g>
+  <rect x="274" y="274" width="476" height="476" rx="92" fill="#d92d3a"/>
+  <path d="M574 318 385 556h132l-67 174 194-274H526z" fill="#fff"/>
+  <circle cx="354" cy="354" r="26" fill="#171a1f"/>
+  <path d="M354 354h72M354 354v72" fill="none" stroke="#fff" stroke-width="18" stroke-linecap="round"/>
+</svg>

@@ -8,7 +8,7 @@ use crate::image::parser;
 use crate::usb::device::AicDevice;
 
 #[cfg(windows)]
-const AIC_WINUSB_INF: &str = r#"; aic-flash WinUSB driver binding for ArtInChip upgrade devices
+const AIC_WINUSB_INF: &str = r#"; artinchip-flash WinUSB driver binding for ArtInChip upgrade devices
 [Version]
 Signature="$Windows NT$"
 Class=USBDevice
@@ -40,18 +40,28 @@ AddReg=Device_AddReg
 HKR,,DeviceInterfaceGUIDs,0x10000,"{d70f0b35-5a30-4b41-b44f-a2e010c06977}"
 
 [Strings]
-ProviderName="aic-flash"
+ProviderName="artinchip-flash"
 DeviceName="ArtInChip USB Upgrade Device"
 "#;
 
 pub const AIC_USB_VID: u16 = 0x33C3;
 pub const AIC_USB_PID: u16 = 0x6677;
+pub const APP_NAME: &str = "artinchip-flash";
+const LEGACY_APP_NAME: &str = "aic-flash";
 
 pub fn default_app_dir() -> PathBuf {
+    app_dir_for(APP_NAME)
+}
+
+fn legacy_app_dir() -> PathBuf {
+    app_dir_for(LEGACY_APP_NAME)
+}
+
+fn app_dir_for(app_name: &str) -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("aic-flash");
+            return PathBuf::from(appdata).join(app_name);
         }
     }
     #[cfg(target_os = "macos")]
@@ -60,25 +70,55 @@ pub fn default_app_dir() -> PathBuf {
             return home
                 .join("Library")
                 .join("Application Support")
-                .join("aic-flash");
+                .join(app_name);
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg).join("aic-flash");
+            return PathBuf::from(xdg).join(app_name);
         }
         if let Some(home) = home_dir() {
-            return home.join(".config").join("aic-flash");
+            return home.join(".config").join(app_name);
         }
     }
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata).join("aic-flash");
+        return PathBuf::from(appdata).join(app_name);
     }
     if let Some(home) = std::env::var_os("USERPROFILE") {
-        return PathBuf::from(home).join(".aic-flash");
+        return PathBuf::from(home).join(format!(".{app_name}"));
     }
-    PathBuf::from(".aic-flash")
+    PathBuf::from(format!(".{app_name}"))
+}
+
+pub fn migrate_legacy_app_data() -> Result<(), String> {
+    let source = legacy_app_dir();
+    let destination = default_app_dir();
+    if source == destination || !source.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&destination).map_err(|e| {
+        format!(
+            "Failed to create migration destination '{}': {}",
+            destination.display(),
+            e
+        )
+    })?;
+    for file_name in ["config.ini", "img_history.txt"] {
+        let source_file = source.join(file_name);
+        let destination_file = destination.join(file_name);
+        if source_file.is_file() && !destination_file.exists() {
+            fs::copy(&source_file, &destination_file).map_err(|e| {
+                format!(
+                    "Failed to migrate '{}' to '{}': {}",
+                    source_file.display(),
+                    destination_file.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(unix, target_os = "macos"))]
@@ -104,7 +144,7 @@ pub fn image_history_path() -> PathBuf {
 
 pub fn environment_report(image: Option<&Path>) -> String {
     let mut lines = Vec::new();
-    lines.push("aic-flash standalone environment check".to_string());
+    lines.push("artinchip-flash standalone environment check".to_string());
     lines.push(format!("Version: {}", build_info::VERSION));
     lines.push(format!("Build: {}", build_info::BUILD));
     lines.push(format!("Commit: {}", build_info::COMMIT));
@@ -223,12 +263,12 @@ fn powershell_single_quoted(value: &str) -> String {
 fn install_usb_access() -> Result<(), String> {
     let dir = ensure_app_dir()?.join("driver");
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create '{}': {}", dir.display(), e))?;
-    let rules = dir.join("99-aic-flash.rules");
+    let rules = dir.join("99-artinchip-flash.rules");
     fs::write(&rules, linux_udev_rule())
         .map_err(|e| format!("Failed to write '{}': {}", rules.display(), e))?;
 
     let script = format!(
-        "cp {} /etc/udev/rules.d/99-aic-flash.rules && udevadm control --reload-rules && udevadm trigger",
+        "cp {} /etc/udev/rules.d/99-artinchip-flash.rules && udevadm control --reload-rules && udevadm trigger",
         sh_single_quoted(&rules.to_string_lossy())
     );
     let status = Command::new("sh")
@@ -244,7 +284,7 @@ fn install_usb_access() -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "udev rule install exited with {}. You can run manually: sudo cp {} /etc/udev/rules.d/99-aic-flash.rules && sudo udevadm control --reload-rules && sudo udevadm trigger",
+            "udev rule install exited with {}. You can run manually: sudo cp {} /etc/udev/rules.d/99-artinchip-flash.rules && sudo udevadm control --reload-rules && sudo udevadm trigger",
             status,
             rules.display()
         ))
@@ -317,17 +357,17 @@ fn platform_name() -> &'static str {
 
 #[cfg(windows)]
 fn usb_permission_hint() -> &'static str {
-    "Hint: use the Driver button or `aic-flash install-usb-access` to bind WinUSB when USB open/claim fails."
+    "Hint: use the Driver button or `artinchip-flash install-usb-access` to bind WinUSB when USB open/claim fails."
 }
 
 #[cfg(target_os = "linux")]
 fn usb_permission_hint() -> &'static str {
-    "Hint: use the Driver button or `aic-flash install-usb-access`, then reconnect the device."
+    "Hint: use the Driver button or `artinchip-flash install-usb-access`, then reconnect the device."
 }
 
 #[cfg(target_os = "macos")]
 fn usb_permission_hint() -> &'static str {
-    "Hint: macOS usually needs no driver. If USB access fails, close other aic-flash/AiBurn instances, unplug and reconnect the board, and avoid USB hubs while testing."
+    "Hint: macOS usually needs no driver. If USB access fails, close other artinchip-flash/AiBurn instances, unplug and reconnect the board, and avoid USB hubs while testing."
 }
 
 #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
@@ -354,7 +394,7 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap(),
-            "aic-flash"
+            "artinchip-flash"
         );
         assert_eq!(config_path().file_name().unwrap(), "config.ini");
         assert_eq!(image_history_path().file_name().unwrap(), "img_history.txt");

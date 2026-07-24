@@ -1,15 +1,15 @@
 use std::fs;
 use std::path::PathBuf;
 
-use aic_flash::build_info;
-use aic_flash::image;
-use aic_flash::standalone;
-use aic_flash::usb;
+use artinchip_flash::build_info;
+use artinchip_flash::image;
+use artinchip_flash::standalone;
+use artinchip_flash::usb;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "aic-flash",
+    name = "artinchip-flash",
     version = build_info::VERSION,
     long_version = build_info::LONG_VERSION,
     about = "Cross-platform flasher for ArtInChip SoCs"

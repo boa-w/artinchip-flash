@@ -5,15 +5,15 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aic_flash::app_config::{
+use artinchip_flash::app_config::{
     append_image_history, compat_tool_path, load_image_history, AppConfig,
 };
-use aic_flash::build_info;
-use aic_flash::i18n::{command_label, tr, Language, Msg};
-use aic_flash::image::parser::{self, ImageSummary, MetaSummary};
-use aic_flash::official::{self, OfficialArgs, OfficialCommand};
-use aic_flash::standalone;
-use aic_flash::usb::device::{AicDevice, BurnEvent, BurnOptions, DeviceInfo};
+use artinchip_flash::build_info;
+use artinchip_flash::i18n::{command_label, tr, Language, Msg};
+use artinchip_flash::image::parser::{self, ImageSummary, MetaSummary};
+use artinchip_flash::official::{self, OfficialArgs, OfficialCommand};
+use artinchip_flash::standalone;
+use artinchip_flash::usb::device::{AicDevice, BurnEvent, BurnOptions, DeviceInfo};
 use eframe::egui;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1136,6 +1136,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(app_window_title(Language::from_code("zh_cn")))
+            .with_icon(app_icon())
             .with_inner_size([1120.0, 760.0]),
         ..Default::default()
     };
@@ -1144,6 +1145,18 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(GuiApp::new(cc)))),
     )
+}
+
+fn app_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../../assets/artinchip-flash.png"))
+        .expect("embedded application icon must be a valid PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
 }
 
 fn app_window_title(lang: Language) -> String {
@@ -1310,10 +1323,10 @@ fn localize_device_status(lang: Language, status: &str) -> String {
 fn macos_recovery_hint(lang: Language) -> &'static str {
     match lang {
         Language::ZhCn => {
-            "处理建议：关闭其它 aic-flash/AiBurn 实例，拔插或断电重启板子，重新进入升级模式；优先直连 Mac，先避开 hub/dock。"
+            "处理建议：关闭其它 artinchip-flash/AiBurn 实例，拔插或断电重启板子，重新进入升级模式；优先直连 Mac，先避开 hub/dock。"
         }
         Language::En => {
-            "Recovery hint: close other aic-flash/AiBurn instances, unplug or power-cycle the board, enter upgrade mode again, and test with a direct Mac connection before using hubs/docks."
+            "Recovery hint: close other artinchip-flash/AiBurn instances, unplug or power-cycle the board, enter upgrade mode again, and test with a direct Mac connection before using hubs/docks."
         }
     }
 }

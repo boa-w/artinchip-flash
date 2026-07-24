@@ -1,4 +1,4 @@
-# aic-flash
+# artinchip-flash
 
 Cross-platform CLI flasher for ArtInChip SoCs.  Communicates with the
 device over USB using the CBW/CSW-based UPG protocol (reverse-engineered
@@ -22,15 +22,15 @@ Platform notes:
 cargo build --release
 ```
 
-The CLI binary is placed at `target/release/aic-flash`.
+The CLI binary is placed at `target/release/artinchip-flash`.
 
 To build the GUI:
 
 ```sh
-cargo build --release --bin aic-flash-gui
+cargo build --release --bin artinchip-flash-gui
 ```
 
-The GUI binary is placed at `target/release/aic-flash-gui`.
+The GUI binary is placed at `target/release/artinchip-flash-gui`.
 
 [Rust]: https://rustup.rs
 
@@ -38,18 +38,18 @@ The GUI binary is placed at `target/release/aic-flash-gui`.
 
 Nightly builds publish both portable archives and native installers:
 
-- Windows: `aic-flash-windows-x64-setup.exe` is the recommended installer with
-  a full setup wizard and completion page. `aic-flash-windows-x64.msi` is also
+- Windows: `artinchip-flash-windows-x64-setup.exe` is the recommended installer with
+  a full setup wizard and completion page. `artinchip-flash-windows-x64.msi` is also
   published for MSI-based deployment. Both install the CLI, GUI, README, Start
   Menu shortcuts, and appear in Windows Apps/Programs as
-  `aic-flash ArtInChip Flasher`. `aic-flash-windows-x64.zip` is the portable
+  `artinchip-flash ArtInChip Flasher`. `artinchip-flash-windows-x64.zip` is the portable
   package.
-- macOS: `aic-flash-macos-arm64.pkg` installs `aic-flash-gui.app` to
-  `/Applications` and the CLI to `/usr/local/bin/aic-flash`.
-  `aic-flash-macos-arm64.tar.gz` is the portable package.
-- Linux: `aic-flash-linux-x64.deb` installs the CLI/GUI to `/usr/bin`, adds a
+- macOS: `artinchip-flash-macos-arm64.pkg` installs `artinchip-flash-gui.app` to
+  `/Applications` and the CLI to `/usr/local/bin/artinchip-flash`.
+  `artinchip-flash-macos-arm64.tar.gz` is the portable package.
+- Linux: `artinchip-flash-linux-x64.deb` installs the CLI/GUI to `/usr/bin`, adds a
   desktop entry, and installs the udev rule for `33c3:6677`.
-  `aic-flash-linux-x64.tar.gz` is the portable package.
+  `artinchip-flash-linux-x64.tar.gz` is the portable package.
 
 Unsigned macOS and Windows installers may show the normal first-run security
 prompt until signing/notarization is configured.
@@ -57,13 +57,13 @@ prompt until signing/notarization is configured.
 ## Usage
 
 ```
-aic-flash scan          # list connected ArtInChip devices
-aic-flash info          # query connected device (HWINFO, storage media)
-aic-flash info <img>    # parse .img file header and META entries
-aic-flash env-check [img]        # check config, USB access, and optional image
-aic-flash install-usb-access     # install WinUSB binding or Linux udev rule
-aic-flash burn <img>    # burn firmware image to device
-aic-flash burn <img> --no-reset  # burn without resetting
+artinchip-flash scan          # list connected ArtInChip devices
+artinchip-flash info          # query connected device (HWINFO, storage media)
+artinchip-flash info <img>    # parse .img file header and META entries
+artinchip-flash env-check [img]        # check config, USB access, and optional image
+artinchip-flash install-usb-access     # install WinUSB binding or Linux udev rule
+artinchip-flash burn <img>    # burn firmware image to device
+artinchip-flash burn <img> --no-reset  # burn without resetting
 ```
 
 ## GUI
@@ -71,17 +71,17 @@ aic-flash burn <img> --no-reset  # burn without resetting
 The GUI implements the AiBurn-compatible workflow natively. It stores its own
 configuration under the platform user configuration directory:
 
-- Windows: `%APPDATA%\aic-flash\config.ini`
-- macOS: `~/Library/Application Support/aic-flash/config.ini`
-- Linux: `$XDG_CONFIG_HOME/aic-flash/config.ini` or
-  `~/.config/aic-flash/config.ini`
+- Windows: `%APPDATA%\artinchip-flash\config.ini`
+- macOS: `~/Library/Application Support/artinchip-flash/config.ini`
+- Linux: `$XDG_CONFIG_HOME/artinchip-flash/config.ini` or
+  `~/.config/artinchip-flash/config.ini`
 
 If an official `C:\ArtInChip\AiBurn\AiBurn.ini` exists on Windows it can still
 be imported for compatibility, but the core burn flow does not require the
 official package.
 
 ```sh
-cargo run --bin aic-flash-gui
+cargo run --bin artinchip-flash-gui
 ```
 
 Implemented GUI features:
@@ -114,8 +114,8 @@ image parsing and online burning work without that directory.
 The same standalone checks are available without the GUI:
 
 ```sh
-aic-flash env-check firmware.img
-aic-flash install-usb-access
+artinchip-flash env-check firmware.img
+artinchip-flash install-usb-access
 ```
 
 ### Linux USB permissions
@@ -124,7 +124,7 @@ For non-root access, install the udev rule from the GUI Driver button or run
 the equivalent manually:
 
 ```sh
-sudo tee /etc/udev/rules.d/99-aic-flash.rules >/dev/null <<'EOF'
+sudo tee /etc/udev/rules.d/99-artinchip-flash.rules >/dev/null <<'EOF'
 SUBSYSTEM=="usb", ATTR{idVendor}=="33c3", ATTR{idProduct}=="6677", TAG+="uaccess", MODE="0666"
 EOF
 sudo udevadm control --reload-rules
@@ -143,13 +143,13 @@ debugging tools before retrying.
 
 ```sh
 # Scan for devices
-aic-flash scan
+artinchip-flash scan
 
 # Inspect a firmware image
-aic-flash info firmware_d21x_demo128-nand.img
+artinchip-flash info firmware_d21x_demo128-nand.img
 
 # Flash the device
-aic-flash burn firmware_d21x_demo128-nand.img
+artinchip-flash burn firmware_d21x_demo128-nand.img
 ```
 
 ### Typical burn output

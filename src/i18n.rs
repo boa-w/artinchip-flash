@@ -178,7 +178,7 @@ pub fn command_label(lang: Language, command: OfficialCommand) -> &'static str {
 
 fn zh_cn(msg: Msg) -> &'static str {
     match msg {
-        Msg::AppTitle => "aic-flash 图形烧录工具",
+        Msg::AppTitle => "artinchip-flash 图形烧录工具",
         Msg::TabBurn => "烧录",
         Msg::TabImage => "镜像",
         Msg::TabTools => "工具",
@@ -284,7 +284,7 @@ fn zh_cn(msg: Msg) -> &'static str {
 
 fn en(msg: Msg) -> &'static str {
     match msg {
-        Msg::AppTitle => "aic-flash GUI",
+        Msg::AppTitle => "artinchip-flash GUI",
         Msg::TabBurn => "Burn",
         Msg::TabImage => "Image",
         Msg::TabTools => "Tools",
