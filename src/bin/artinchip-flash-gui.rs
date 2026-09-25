@@ -13,6 +13,7 @@ use artinchip_flash::i18n::{command_label, tr, Language, Msg};
 use artinchip_flash::image::parser::{self, ImageSummary, MetaSummary};
 use artinchip_flash::official::{self, OfficialArgs, OfficialCommand};
 use artinchip_flash::standalone;
+use artinchip_flash::uart::{SerialPortInfo, UartDevice, UartMonitor, UartOptions};
 use artinchip_flash::usb::device::{AicDevice, BurnEvent, BurnOptions, DeviceInfo};
 use eframe::egui;
 
@@ -22,6 +23,29 @@ enum Tab {
     Image,
     Tools,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportKind {
+    Usb,
+    Uart,
+}
+
+impl TransportKind {
+    fn from_config(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("uart") {
+            TransportKind::Uart
+        } else {
+            TransportKind::Usb
+        }
+    }
+
+    fn config_value(self) -> &'static str {
+        match self {
+            TransportKind::Usb => "usb",
+            TransportKind::Uart => "uart",
+        }
+    }
 }
 
 enum WorkerEvent {
@@ -43,8 +67,11 @@ type DeviceScanResult = (Result<Vec<DeviceInfo>, String>, bool);
 struct GuiApp {
     config: AppConfig,
     tab: Tab,
+    transport: TransportKind,
     devices: Vec<DeviceInfo>,
     selected_device: Option<usize>,
+    serial_ports: Vec<SerialPortInfo>,
+    selected_serial_port: Option<usize>,
     image_summary: Option<ImageSummary>,
     selected_parts: Vec<String>,
     image_history: Vec<(PathBuf, String)>,
@@ -56,7 +83,10 @@ struct GuiApp {
     auto_started_for_device: bool,
     rx: Option<Receiver<WorkerEvent>>,
     scan_rx: Option<Receiver<DeviceScanResult>>,
+    serial_scan_rx: Option<Receiver<Result<Vec<SerialPortInfo>, String>>>,
     device_scan_in_progress: bool,
+    monitor: Option<UartMonitor>,
+    monitor_input: String,
     official_args: OfficialArgs,
     settings_path: PathBuf,
     log_started_at: Instant,
@@ -68,6 +98,7 @@ impl GuiApp {
         let config = AppConfig::load_default();
         let settings_path = config.app_dir.join("config.ini");
         let image_history = load_image_history(&config.app_dir);
+        let transport = TransportKind::from_config(&config.transport);
         let mut app = Self {
             selected_parts: config.selected_parts.clone(),
             official_args: OfficialArgs {
@@ -76,8 +107,11 @@ impl GuiApp {
             },
             config,
             tab: Tab::Burn,
+            transport,
             devices: Vec::new(),
             selected_device: None,
+            serial_ports: Vec::new(),
+            selected_serial_port: None,
             image_summary: None,
             image_history,
             log_lines: Vec::new(),
@@ -88,7 +122,10 @@ impl GuiApp {
             auto_started_for_device: false,
             rx: None,
             scan_rx: None,
+            serial_scan_rx: None,
             device_scan_in_progress: false,
+            monitor: None,
+            monitor_input: String::new(),
             settings_path,
             log_started_at: Instant::now(),
         };
@@ -111,6 +148,10 @@ impl GuiApp {
         if self.device_scan_in_progress {
             return;
         }
+        if self.transport == TransportKind::Uart {
+            self.start_serial_scan(ctx);
+            return;
+        }
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
         self.device_scan_in_progress = true;
@@ -119,6 +160,58 @@ impl GuiApp {
             let _ = tx.send((result, allow_auto_burn));
             ctx.request_repaint();
         });
+    }
+
+    fn start_serial_scan(&mut self, ctx: egui::Context) {
+        if self.device_scan_in_progress {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.serial_scan_rx = Some(rx);
+        self.device_scan_in_progress = true;
+        thread::spawn(move || {
+            let result = UartDevice::list_ports();
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    fn apply_serial_scan(&mut self, result: Result<Vec<SerialPortInfo>, String>) {
+        match result {
+            Ok(ports) => {
+                self.serial_ports = ports;
+                if self.serial_ports.is_empty() {
+                    self.selected_serial_port = None;
+                    self.log(format!(
+                        "{}: {}",
+                        self.t(Msg::Scan),
+                        self.t(Msg::NoSerialPorts)
+                    ));
+                } else {
+                    let configured = self.config.serial_port.clone();
+                    self.selected_serial_port = self
+                        .serial_ports
+                        .iter()
+                        .position(|port| !configured.is_empty() && port.port_name == configured)
+                        .or(Some(0));
+                    if configured.is_empty() {
+                        if let Some(port) = self.serial_ports.first() {
+                            self.config.serial_port = port.port_name.clone();
+                        }
+                    }
+                    let summary = match self.lang() {
+                        Language::ZhCn => {
+                            format!("扫描完成：发现 {} 个串口", self.serial_ports.len())
+                        }
+                        Language::En => {
+                            format!("Scan complete: {} serial port(s)", self.serial_ports.len())
+                        }
+                    };
+                    self.log(summary);
+                }
+            }
+            Err(e) => self.log(format!("{}: {}", self.t(Msg::SerialScanFailed), e)),
+        }
     }
 
     fn apply_device_scan(
@@ -232,9 +325,75 @@ impl GuiApp {
         }
     }
 
+    fn start_monitor(&mut self) {
+        if self.monitor.is_some() {
+            return;
+        }
+        let selected = self.selected_serial_port_name();
+        let resolved = if selected.is_empty() || selected.eq_ignore_ascii_case("auto") {
+            self.serial_ports
+                .iter()
+                .find(|port| port.port_type == "usb")
+                .or_else(|| self.serial_ports.first())
+                .map(|port| port.port_name.clone())
+        } else {
+            Some(selected)
+        };
+        let Some(path) = resolved else {
+            self.log(self.t(Msg::NoSerialPorts));
+            return;
+        };
+        match UartMonitor::start(&path, self.config.serial_baud.max(1200)) {
+            Ok(monitor) => {
+                self.monitor = Some(monitor);
+                self.log(match self.lang() {
+                    Language::ZhCn => format!("已连接串口监视：{}", path),
+                    Language::En => format!("UART monitor connected: {}", path),
+                });
+            }
+            Err(e) => self.log_error(e),
+        }
+    }
+
+    fn stop_monitor(&mut self) {
+        if let Some(mut monitor) = self.monitor.take() {
+            monitor.close();
+            self.log(match self.lang() {
+                Language::ZhCn => "串口监视已断开".to_string(),
+                Language::En => "UART monitor disconnected".to_string(),
+            });
+        }
+    }
+
+    fn monitor_trigger_upgrade(&mut self) {
+        if let Some(monitor) = &self.monitor {
+            monitor.trigger_upgrade();
+            self.log(match self.lang() {
+                Language::ZhCn => {
+                    "已发送 `aicupg gotobl` / `aicupg uart 0`；若设备未自动重启，请手动复位"
+                        .to_string()
+                }
+                Language::En => {
+                    "Sent `aicupg gotobl` / `aicupg uart 0`; reset the board if it does not reboot"
+                        .to_string()
+                }
+            });
+        }
+    }
+
+    fn monitor_send(&mut self, text: &str) {
+        if let Some(monitor) = &self.monitor {
+            monitor.send_line(text);
+            self.log(format!("> {}", text));
+        }
+    }
+
     fn start_burn(&mut self) {
         if self.busy {
             return;
+        }
+        if self.transport == TransportKind::Uart {
+            self.stop_monitor();
         }
         let Some(path) = self.config.image_path.clone() else {
             self.log(self.t(Msg::SelectImageFirst));
@@ -243,21 +402,32 @@ impl GuiApp {
         let selected_device = self
             .selected_device
             .and_then(|idx| self.devices.get(idx).cloned());
-        if let Some(device) = &selected_device {
-            if !device.ready {
-                self.log_not_ready_device(device, NotReadyContext::BurnCancelled);
+        let use_uart = self.transport == TransportKind::Uart;
+        if !use_uart {
+            if let Some(device) = &selected_device {
+                if !device.ready {
+                    self.log_not_ready_device(device, NotReadyContext::BurnCancelled);
+                    return;
+                }
+            } else if !self.devices.is_empty() && self.devices.iter().all(|device| !device.ready) {
+                self.log(burn_cancelled_no_ready(self.lang()));
                 return;
             }
-        } else if !self.devices.is_empty() && self.devices.iter().all(|device| !device.ready) {
-            self.log(burn_cancelled_no_ready(self.lang()));
-            return;
         }
         let selected_parts = self.selected_parts.clone();
         let reset_after_burn = true;
         let timeout = Duration::from_secs(self.config.burn_timeout_secs.max(1));
-        let adb_scan = self.config.adb_scan;
+        let adb_scan = self.config.adb_scan && !use_uart;
         let aiburn_dir = self.config.aiburn_dir.clone();
         let lang = self.lang();
+        let uart_port = self.selected_serial_port_name();
+        let uart_options = UartOptions {
+            baudrate: self.config.serial_baud.max(1200),
+            max_baudrate: (self.config.serial_speed > self.config.serial_baud)
+                .then_some(self.config.serial_speed),
+            auto_enter: self.config.serial_auto_enter,
+            ..Default::default()
+        };
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.busy = true;
@@ -269,6 +439,16 @@ impl GuiApp {
             self.t(Msg::BurnImageFile),
             path.display()
         ));
+        if use_uart && self.config.serial_auto_enter {
+            self.log(match lang {
+                Language::ZhCn => {
+                    "连接 UART 时若设备未处于升级模式，将自动发送 `aicupg gotobl` / `aicupg uart 0`；必要时请复位设备".to_string()
+                }
+                Language::En => {
+                    "If the device is not in upgrade mode, the tool will send `aicupg gotobl` / `aicupg uart 0`; reset the board if needed".to_string()
+                }
+            });
+        }
 
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
@@ -292,11 +472,6 @@ impl GuiApp {
                     thread::sleep(Duration::from_millis(700));
                 }
                 let (data, _header, metas, _summary) = parser::read_image(&path)?;
-                let mut dev = if let Some(device) = selected_device {
-                    AicDevice::open_by_location(device.bus_number, device.address)?
-                } else {
-                    AicDevice::open_first()?
-                };
                 let options = BurnOptions {
                     selected_parts,
                     reset_after_burn,
@@ -305,7 +480,17 @@ impl GuiApp {
                 let mut callback = |event| {
                     let _ = tx.send(WorkerEvent::Burn(event));
                 };
-                dev.burn_image_with_options(&data, &metas, &options, Some(&mut callback))?;
+                if use_uart {
+                    let mut dev = open_uart_backend(&uart_port, uart_options)?;
+                    dev.burn_image_with_options(&data, &metas, &options, Some(&mut callback))?;
+                } else {
+                    let mut dev = if let Some(device) = selected_device {
+                        AicDevice::open_by_location(device.bus_number, device.address)?
+                    } else {
+                        AicDevice::open_first()?
+                    };
+                    dev.burn_image_with_options(&data, &metas, &options, Some(&mut callback))?;
+                }
                 Ok(())
             })();
             if let Err(e) = result {
@@ -319,25 +504,50 @@ impl GuiApp {
         if self.busy {
             return;
         }
+        if self.transport == TransportKind::Uart {
+            self.stop_monitor();
+        }
         let selected_device = self
             .selected_device
             .and_then(|idx| self.devices.get(idx).cloned());
-        if let Some(device) = &selected_device {
-            if !device.ready {
-                self.log_not_ready_device(device, NotReadyContext::DeviceInfoCancelled);
+        let use_uart = self.transport == TransportKind::Uart;
+        if !use_uart {
+            if let Some(device) = &selected_device {
+                if !device.ready {
+                    self.log_not_ready_device(device, NotReadyContext::DeviceInfoCancelled);
+                    return;
+                }
+            } else if !self.devices.is_empty() && self.devices.iter().all(|device| !device.ready) {
+                self.log(device_info_cancelled_no_ready(self.lang()));
                 return;
             }
-        } else if !self.devices.is_empty() && self.devices.iter().all(|device| !device.ready) {
-            self.log(device_info_cancelled_no_ready(self.lang()));
-            return;
         }
         let read_log = self.config.read_device_log;
         let lang = self.lang();
+        let uart_port = self.selected_serial_port_name();
+        let uart_options = UartOptions {
+            baudrate: self.config.serial_baud.max(1200),
+            max_baudrate: (self.config.serial_speed > self.config.serial_baud)
+                .then_some(self.config.serial_speed),
+            auto_enter: self.config.serial_auto_enter,
+            ..Default::default()
+        };
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.busy = true;
         thread::spawn(move || {
             let result = (|| -> Result<String, String> {
+                if use_uart {
+                    let mut dev = open_uart_backend(&uart_port, uart_options)?;
+                    let mut text = dev.device_info_text()?;
+                    if read_log {
+                        text.push_str("\n\n");
+                        text.push_str(tr(lang, Msg::DeviceLogDivider));
+                        text.push('\n');
+                        text.push_str(&dev.get_device_log()?);
+                    }
+                    return Ok(text);
+                }
                 let mut dev = if let Some(device) = selected_device {
                     AicDevice::open_by_location(device.bus_number, device.address)?
                 } else {
@@ -401,6 +611,18 @@ impl GuiApp {
     fn poll_worker(&mut self, ctx: &egui::Context) {
         self.poll_device_scan(ctx);
 
+        let monitor_lines: Vec<String> = self
+            .monitor
+            .as_ref()
+            .map(|monitor| monitor.poll())
+            .unwrap_or_default();
+        if !monitor_lines.is_empty() {
+            for line in monitor_lines {
+                self.log(line);
+            }
+            ctx.request_repaint();
+        }
+
         let mut done = false;
         if let Some(rx) = self.rx.take() {
             while let Ok(event) = rx.try_recv() {
@@ -438,6 +660,18 @@ impl GuiApp {
             }
             if !done {
                 self.scan_rx = Some(rx);
+            }
+        }
+        let mut serial_done = false;
+        if let Some(rx) = self.serial_scan_rx.take() {
+            while let Ok(result) = rx.try_recv() {
+                self.apply_serial_scan(result);
+                self.device_scan_in_progress = false;
+                serial_done = true;
+                ctx.request_repaint();
+            }
+            if !serial_done {
+                self.serial_scan_rx = Some(rx);
             }
         }
     }
@@ -551,28 +785,34 @@ impl GuiApp {
             build_info::VERSION_WITH_BUILD
         ));
         let lang = self.lang();
-        ui.horizontal(|ui| {
-            ui.label(self.t(Msg::Device));
-            egui::ComboBox::from_id_salt("device_select")
-                .selected_text(self.selected_device_label())
-                .show_ui(ui, |ui| {
-                    for (idx, device) in self.devices.iter().enumerate() {
-                        ui.selectable_value(
-                            &mut self.selected_device,
-                            Some(idx),
-                            format!(
-                                "{}:{}  {:04x}:{:04x}  {}  {}",
-                                device.bus_number,
-                                device.port_path_or_address(),
-                                device.vendor_id,
-                                device.product_id,
-                                device.speed,
-                                readiness_label(lang, device.ready)
-                            ),
-                        );
-                    }
-                });
-        });
+        self.ui_transport(ui);
+        if self.transport == TransportKind::Usb {
+            ui.horizontal(|ui| {
+                ui.label(self.t(Msg::Device));
+                egui::ComboBox::from_id_salt("device_select")
+                    .selected_text(self.selected_device_label())
+                    .show_ui(ui, |ui| {
+                        for (idx, device) in self.devices.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.selected_device,
+                                Some(idx),
+                                format!(
+                                    "{}:{}  {:04x}:{:04x}  {}  {}",
+                                    device.bus_number,
+                                    device.port_path_or_address(),
+                                    device.vendor_id,
+                                    device.product_id,
+                                    device.speed,
+                                    readiness_label(lang, device.ready)
+                                ),
+                            );
+                        }
+                    });
+            });
+        } else {
+            self.ui_serial_selector(ui);
+            self.ui_monitor(ui);
+        }
 
         ui.horizontal(|ui| {
             ui.label(self.t(Msg::Image));
@@ -647,6 +887,185 @@ impl GuiApp {
             ui.checkbox(&mut self.config.adb_scan, adb_scan);
             ui.checkbox(&mut self.config.read_device_log, read_device_log);
         });
+    }
+
+    fn ui_transport(&mut self, ui: &mut egui::Ui) {
+        let mut transport = self.transport;
+        let mut scan_requested = false;
+        let scanning = self.device_scan_in_progress;
+        ui.horizontal(|ui| {
+            ui.label(self.t(Msg::Transport));
+            egui::ComboBox::from_id_salt("transport_select")
+                .selected_text(match transport {
+                    TransportKind::Usb => self.t(Msg::TransportUsb),
+                    TransportKind::Uart => self.t(Msg::TransportUart),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut transport,
+                        TransportKind::Usb,
+                        self.t(Msg::TransportUsb),
+                    );
+                    ui.selectable_value(
+                        &mut transport,
+                        TransportKind::Uart,
+                        self.t(Msg::TransportUart),
+                    );
+                });
+            if transport == TransportKind::Uart {
+                ui.separator();
+                ui.label(self.t(Msg::BaudRate));
+                ui.add(
+                    egui::DragValue::new(&mut self.config.serial_baud)
+                        .range(1200..=6_000_000)
+                        .speed(100.0),
+                );
+                ui.label(self.t(Msg::MaxBaudRate));
+                ui.add(
+                    egui::DragValue::new(&mut self.config.serial_speed)
+                        .range(0..=6_000_000)
+                        .speed(100.0),
+                );
+                ui.separator();
+                ui.add_enabled_ui(!scanning, |ui| {
+                    if ui.button(self.t(Msg::Refresh)).clicked() {
+                        scan_requested = true;
+                    }
+                });
+            }
+        });
+        if transport != self.transport {
+            if self.transport == TransportKind::Uart {
+                self.stop_monitor();
+            }
+            self.transport = transport;
+            self.config.transport = transport.config_value().to_string();
+            scan_requested = true;
+        }
+        if scan_requested {
+            let ctx = ui.ctx().clone();
+            self.start_device_scan(ctx, true);
+        }
+        if self.transport == TransportKind::Uart {
+            ui.label(
+                egui::RichText::new(self.t(Msg::UartModeHint))
+                    .small()
+                    .weak(),
+            );
+        }
+    }
+
+    fn ui_monitor(&mut self, ui: &mut egui::Ui) {
+        let connect_label = self.t(Msg::ConnectMonitor);
+        let disconnect_label = self.t(Msg::DisconnectMonitor);
+        let trigger_label = self.t(Msg::EnterUpgradeMode);
+        let send_label = self.t(Msg::Send);
+        let auto_label = self.t(Msg::AutoEnterUpgrade);
+        let input_hint = self.t(Msg::MonitorInputHint);
+        let monitor_active = self.monitor.is_some();
+
+        let mut connect = false;
+        let mut disconnect = false;
+        let mut trigger = false;
+        let mut send_text: Option<String> = None;
+
+        ui.horizontal(|ui| {
+            if monitor_active {
+                if ui.button(disconnect_label).clicked() {
+                    disconnect = true;
+                }
+                if ui.button(trigger_label).clicked() {
+                    trigger = true;
+                }
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.monitor_input)
+                        .hint_text(input_hint)
+                        .desired_width(f32::INFINITY),
+                );
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button(send_label).clicked() || enter {
+                    let text = self.monitor_input.trim().to_string();
+                    if !text.is_empty() {
+                        self.monitor_input.clear();
+                        send_text = Some(text);
+                    }
+                }
+            } else if ui.button(connect_label).clicked() {
+                connect = true;
+            }
+            ui.checkbox(&mut self.config.serial_auto_enter, auto_label);
+        });
+        ui.label(egui::RichText::new(self.t(Msg::MonitorHint)).small().weak());
+
+        if connect {
+            self.start_monitor();
+        }
+        if disconnect {
+            self.stop_monitor();
+        }
+        if trigger {
+            self.monitor_trigger_upgrade();
+        }
+        if let Some(text) = send_text {
+            self.monitor_send(&text);
+        }
+        if self
+            .monitor
+            .as_ref()
+            .is_some_and(|monitor| monitor.is_finished())
+        {
+            self.stop_monitor();
+        }
+    }
+
+    fn ui_serial_selector(&mut self, ui: &mut egui::Ui) {
+        let selected_text = self.selected_serial_port_label();
+        let auto_label = self.t(Msg::SerialPortAuto);
+        ui.horizontal(|ui| {
+            ui.label(self.t(Msg::SerialPort));
+            egui::ComboBox::from_id_salt("serial_port_select")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.selected_serial_port, None, auto_label);
+                    for (idx, port) in self.serial_ports.iter().enumerate() {
+                        ui.selectable_value(
+                            &mut self.selected_serial_port,
+                            Some(idx),
+                            &port.port_name,
+                        );
+                    }
+                });
+        });
+        let port_name = self
+            .selected_serial_port
+            .and_then(|idx| self.serial_ports.get(idx))
+            .map(|port| port.port_name.clone())
+            .unwrap_or_default();
+        if port_name != self.config.serial_port {
+            self.config.serial_port = port_name;
+        }
+    }
+
+    fn selected_serial_port_name(&self) -> String {
+        match self.selected_serial_port {
+            Some(idx) => self
+                .serial_ports
+                .get(idx)
+                .map(|port| port.port_name.clone())
+                .unwrap_or_default(),
+            None => self.config.serial_port.clone(),
+        }
+    }
+
+    fn selected_serial_port_label(&self) -> String {
+        match self.selected_serial_port {
+            Some(idx) => self
+                .serial_ports
+                .get(idx)
+                .map(|port| port.port_name.clone())
+                .unwrap_or_else(|| self.t(Msg::SerialPortAuto).to_string()),
+            None => self.t(Msg::SerialPortAuto).to_string(),
+        }
     }
 
     fn ui_partition_selector(&mut self, ui: &mut egui::Ui) {
@@ -1242,6 +1661,14 @@ impl DeviceLabel for DeviceInfo {
     }
 }
 
+fn open_uart_backend(port: &str, options: UartOptions) -> Result<UartDevice, String> {
+    if port.is_empty() || port.eq_ignore_ascii_case("auto") {
+        UartDevice::open_auto(options)
+    } else {
+        UartDevice::open_port(port, options)
+    }
+}
+
 fn scan_summary(lang: Language, detected: usize, ready: usize, not_ready: usize) -> String {
     match lang {
         Language::ZhCn => format!(
@@ -1340,10 +1767,9 @@ fn install_cjk_font(ctx: &egui::Context) {
     };
 
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "cjk_font".to_owned(),
-        egui::FontData::from_owned(font_data).into(),
-    );
+    fonts
+        .font_data
+        .insert("cjk_font".to_owned(), egui::FontData::from_owned(font_data));
 
     println!("Loading CJK font from: {}", font_path);
     fonts

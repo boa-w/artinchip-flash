@@ -2,8 +2,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use artinchip_flash::build_info;
+use artinchip_flash::device::{BurnOptions, UpgDevice};
 use artinchip_flash::image;
+use artinchip_flash::protocol::commands::FwcMeta;
 use artinchip_flash::standalone;
+use artinchip_flash::transport::UpgTransport;
+use artinchip_flash::uart::transport::UartOptions;
+use artinchip_flash::uart::UartDevice;
 use artinchip_flash::usb;
 use clap::{Parser, Subcommand};
 
@@ -21,16 +26,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Scan for connected ArtInChip devices
+    /// Scan for connected ArtInChip USB devices
     Scan,
     /// List all USB devices visible through libusb
     UsbList,
-    /// Show the currently selected project, output directory, and toolchain
-    Info {
-        /// Optional .img file to parse instead of querying a device
-        #[arg(value_name = "IMAGE")]
-        image: Option<PathBuf>,
-    },
+    /// List serial ports that can be used for UART firmware updates
+    SerialList,
     /// Burn firmware image to device
     Burn {
         /// Path to the firmware image file (.img)
@@ -39,6 +40,58 @@ enum Commands {
         /// Do not reset device after burn
         #[arg(long)]
         no_reset: bool,
+        /// Update over UART: port name, or "auto" to probe every serial port
+        #[arg(
+            long,
+            value_name = "PORT",
+            num_args = 0..=1,
+            default_missing_value = "auto"
+        )]
+        uart: Option<String>,
+        /// Initial UART baudrate used to reach the bootloader
+        #[arg(long, default_value_t = 115200)]
+        baud: u32,
+        /// Negotiate a higher UART baudrate before burning (SET_UART_ARGS)
+        #[arg(long, value_name = "BAUD")]
+        speed: Option<u32>,
+        /// Do not try to trigger UART upgrade mode when the protocol does not answer
+        #[arg(long)]
+        no_enter_upg: bool,
+    },
+    /// Show device information, or parse an .img file
+    Info {
+        /// Optional .img file to parse instead of querying a device
+        #[arg(value_name = "IMAGE")]
+        image: Option<PathBuf>,
+        /// Query over UART: port name, or "auto" to probe every serial port
+        #[arg(
+            long,
+            value_name = "PORT",
+            num_args = 0..=1,
+            default_missing_value = "auto"
+        )]
+        uart: Option<String>,
+        /// Initial UART baudrate used to reach the bootloader
+        #[arg(long, default_value_t = 115200)]
+        baud: u32,
+        /// Negotiate a higher UART baudrate before reading device info
+        #[arg(long, value_name = "BAUD")]
+        speed: Option<u32>,
+        /// Do not try to trigger UART upgrade mode when the protocol does not answer
+        #[arg(long)]
+        no_enter_upg: bool,
+    },
+    /// Interactive UART monitor: view device output and send console commands
+    UartMonitor {
+        /// Serial port, or "auto" to use the first USB serial port
+        #[arg(value_name = "PORT", default_value = "auto")]
+        port: String,
+        /// Baudrate of the device console
+        #[arg(long, default_value_t = 115200)]
+        baud: u32,
+        /// Immediately send `aicupg gotobl` / `aicupg uart 0`
+        #[arg(long)]
+        enter_upg: bool,
     },
     /// Check local config, USB access, and optional image parsing
     EnvCheck {
@@ -56,10 +109,90 @@ fn main() {
     match cli.command {
         Commands::Scan => cmd_scan(),
         Commands::UsbList => cmd_usb_list(),
-        Commands::Info { image } => cmd_info(image),
-        Commands::Burn { image, no_reset } => cmd_burn(image, no_reset),
+        Commands::SerialList => cmd_serial_list(),
+        Commands::Info {
+            image,
+            uart,
+            baud,
+            speed,
+            no_enter_upg,
+        } => cmd_info(image, uart, baud, speed, !no_enter_upg),
+        Commands::Burn {
+            image,
+            no_reset,
+            uart,
+            baud,
+            speed,
+            no_enter_upg,
+        } => cmd_burn(image, no_reset, uart, baud, speed, !no_enter_upg),
+        Commands::UartMonitor {
+            port,
+            baud,
+            enter_upg,
+        } => cmd_uart_monitor(port, baud, enter_upg),
         Commands::EnvCheck { image } => cmd_env_check(image),
         Commands::InstallUsbAccess => cmd_install_usb_access(),
+    }
+}
+
+fn uart_options(baud: u32, speed: Option<u32>, auto_enter: bool) -> UartOptions {
+    UartOptions {
+        baudrate: baud,
+        max_baudrate: speed.filter(|speed| *speed > baud),
+        auto_enter,
+        ..Default::default()
+    }
+}
+
+fn open_uart(
+    port: &str,
+    baud: u32,
+    speed: Option<u32>,
+    auto_enter: bool,
+) -> Result<UartDevice, String> {
+    let options = uart_options(baud, speed, auto_enter);
+    if port.eq_ignore_ascii_case("auto") {
+        UartDevice::open_auto(options)
+    } else {
+        UartDevice::open_port(port, options)
+    }
+}
+
+fn cmd_uart_monitor(port: String, baud: u32, enter_upg: bool) {
+    if let Err(e) = artinchip_flash::uart::run_cli_monitor(&port, baud, enter_upg) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+}
+
+fn cmd_serial_list() {
+    match UartDevice::list_ports() {
+        Ok(ports) => {
+            if ports.is_empty() {
+                println!("No serial ports found.");
+                return;
+            }
+            println!("Serial ports:");
+            for port in ports {
+                let usb = match (port.vid, port.pid) {
+                    (Some(vid), Some(pid)) => format!(" usb={:04x}:{:04x}", vid, pid),
+                    _ => String::new(),
+                };
+                let product = port
+                    .product
+                    .as_deref()
+                    .map(|product| format!(" {}", product))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<32} type={:<9}{}{}",
+                    port.port_name, port.port_type, usb, product
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -130,7 +263,13 @@ fn cmd_scan() {
     }
 }
 
-fn cmd_info(image: Option<PathBuf>) {
+fn cmd_info(
+    image: Option<PathBuf>,
+    uart: Option<String>,
+    baud: u32,
+    speed: Option<u32>,
+    auto_enter: bool,
+) {
     if let Some(path) = image {
         // Parse local image file
         match fs::read(&path) {
@@ -145,35 +284,48 @@ fn cmd_info(image: Option<PathBuf>) {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+
+    let result = if let Some(port) = uart {
+        open_uart(&port, baud, speed, auto_enter).and_then(|mut dev| {
+            println!("=== Device Info ({}) ===", dev.transport_name());
+            dev.show_info()?;
+            if let Ok(media) = dev.get_storage_media() {
+                println!("  Storage media: {}", media);
+            }
+            Ok(())
+        })
     } else {
-        // Query device
-        match usb::device::AicDevice::open_first() {
-            Ok(mut dev) => {
-                println!("=== Device Info ===");
-                if let Err(e) = dev.show_info() {
-                    eprintln!("Error reading device info: {}", e);
-                    std::process::exit(1);
-                }
-                // Also try storage media
-                match dev.get_storage_media() {
-                    Ok(media) => println!("  Storage media: {}", media),
-                    Err(_) => {}
-                }
+        usb::device::AicDevice::open_first().and_then(|mut dev| {
+            println!("=== Device Info (USB) ===");
+            dev.show_info()?;
+            if let Ok(media) = dev.get_storage_media() {
+                println!("  Storage media: {}", media);
             }
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }
-        }
+            Ok(())
+        })
+    };
+
+    if let Err(e) = result {
+        eprintln!("{}", e);
+        std::process::exit(1);
     }
 }
 
-fn cmd_burn(image: PathBuf, no_reset: bool) {
+fn cmd_burn(
+    image_path: PathBuf,
+    no_reset: bool,
+    uart: Option<String>,
+    baud: u32,
+    speed: Option<u32>,
+    auto_enter: bool,
+) {
     // 1. Read image file
-    let img_data = match fs::read(&image) {
+    let img_data = match fs::read(&image_path) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("Error reading '{}': {}", image.display(), e);
+            eprintln!("Error reading '{}': {}", image_path.display(), e);
             std::process::exit(1);
         }
     };
@@ -196,31 +348,38 @@ fn cmd_burn(image: PathBuf, no_reset: bool) {
         img_data.len()
     );
 
-    // 3. Connect to device
-    let mut dev = match usb::device::AicDevice::open_first() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Failed to connect: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // 4. Show device info
-    if let Err(e) = dev.show_info() {
-        eprintln!("Warning: could not read device info: {}", e);
-    }
-
-    // 5. Burn!
-    let options = usb::device::BurnOptions {
+    let options = BurnOptions {
         reset_after_burn: !no_reset,
         ..Default::default()
     };
-    if let Err(e) = dev.burn_image_with_options(&img_data, &metas, &options, None) {
+
+    let result = if let Some(port) = uart {
+        open_uart(&port, baud, speed, auto_enter)
+            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options))
+    } else {
+        usb::device::AicDevice::open_first()
+            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options))
+    };
+
+    if let Err(e) = result {
         eprintln!("Burn failed: {}", e);
         std::process::exit(1);
     }
 
     println!("Burn completed successfully!");
+}
+
+fn burn_with_device<T: UpgTransport>(
+    mut dev: UpgDevice<T>,
+    img_data: &[u8],
+    metas: &[FwcMeta],
+    options: &BurnOptions,
+) -> Result<(), String> {
+    println!("Transport: {}", dev.transport_name());
+    if let Err(e) = dev.show_info() {
+        eprintln!("Warning: could not read device info: {}", e);
+    }
+    dev.burn_image_with_options(img_data, metas, options, None)
 }
 
 fn cmd_env_check(image: Option<PathBuf>) {

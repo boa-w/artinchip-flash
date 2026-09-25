@@ -18,6 +18,11 @@ pub struct AppConfig {
     pub app_dir: PathBuf,
     pub aiburn_dir: PathBuf,
     pub upgcmd_path: PathBuf,
+    pub transport: String,
+    pub serial_port: String,
+    pub serial_baud: u32,
+    pub serial_speed: u32,
+    pub serial_auto_enter: bool,
 }
 
 impl Default for AppConfig {
@@ -39,6 +44,11 @@ impl Default for AppConfig {
             app_dir,
             upgcmd_path,
             aiburn_dir,
+            transport: "usb".to_string(),
+            serial_port: String::new(),
+            serial_baud: 115200,
+            serial_speed: 0,
+            serial_auto_enter: true,
         }
     }
 }
@@ -124,7 +134,12 @@ image_path={}\n\
 selected_parts=\"{}\"\n\
 app_dir={}\n\
 aiburn_dir={}\n\
-upgcmd_path={}\n",
+upgcmd_path={}\n\
+transport={}\n\
+serial_port={}\n\
+serial_baud={}\n\
+serial_speed={}\n\
+serial_auto_enter={}\n",
             bool_to_int(self.auto_burn),
             bool_to_int(self.verbose),
             bool_to_int(self.read_device_log),
@@ -137,7 +152,12 @@ upgcmd_path={}\n",
             selected,
             self.app_dir.to_string_lossy().replace('\\', "/"),
             self.aiburn_dir.to_string_lossy().replace('\\', "/"),
-            self.upgcmd_path.to_string_lossy().replace('\\', "/")
+            self.upgcmd_path.to_string_lossy().replace('\\', "/"),
+            self.transport,
+            self.serial_port,
+            self.serial_baud.max(1200),
+            self.serial_speed,
+            bool_to_int(self.serial_auto_enter)
         );
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -190,6 +210,25 @@ upgcmd_path={}\n",
                 if !value.is_empty() {
                     self.upgcmd_path = PathBuf::from(value);
                 }
+            }
+            ("common", "transport") => {
+                self.transport = if value.eq_ignore_ascii_case("uart") {
+                    "uart".to_string()
+                } else {
+                    "usb".to_string()
+                };
+            }
+            ("common", "serial_port") | ("common", "uart_port") => {
+                self.serial_port = value.to_string();
+            }
+            ("common", "serial_baud") | ("common", "uart_baud") => {
+                self.serial_baud = value.parse::<u32>().unwrap_or(self.serial_baud).max(1200);
+            }
+            ("common", "serial_speed") | ("common", "uart_speed") => {
+                self.serial_speed = value.parse::<u32>().unwrap_or(self.serial_speed);
+            }
+            ("common", "serial_auto_enter") | ("common", "uart_auto_enter") => {
+                self.serial_auto_enter = parse_bool(value);
             }
             _ => {}
         }
@@ -334,6 +373,11 @@ mod tests {
         cfg.aiburn_dir = dir.join("compat");
         cfg.upgcmd_path = compat_tool_path(&cfg.aiburn_dir);
         cfg.selected_parts = vec!["spl".to_string(), "os".to_string()];
+        cfg.transport = "uart".to_string();
+        cfg.serial_port = "/dev/ttyUSB0".to_string();
+        cfg.serial_baud = 921600;
+        cfg.serial_speed = 1500000;
+        cfg.serial_auto_enter = false;
 
         cfg.save_to(&path).unwrap();
         let loaded = AppConfig::load_from(&path).unwrap();
@@ -342,6 +386,11 @@ mod tests {
         assert_eq!(loaded.aiburn_dir, cfg.aiburn_dir);
         assert_eq!(loaded.upgcmd_path, cfg.upgcmd_path);
         assert_eq!(loaded.selected_parts, cfg.selected_parts);
+        assert_eq!(loaded.transport, "uart");
+        assert_eq!(loaded.serial_port, "/dev/ttyUSB0");
+        assert_eq!(loaded.serial_baud, 921600);
+        assert_eq!(loaded.serial_speed, 1500000);
+        assert!(!loaded.serial_auto_enter);
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

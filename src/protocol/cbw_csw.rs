@@ -100,7 +100,7 @@ impl CmdHeader {
         // checksum = magic + (reserved<<24|command<<16|version<<8|protocol) + data_length
         let mut sum: u32 = 0;
         sum = sum.wrapping_add(AIC_UPG_SIGN_UPGC);
-        sum = sum.wrapping_add((0u32 << 24) | (command as u32) << 16 | (0x01u32 << 8) | 0x01u32);
+        sum = sum.wrapping_add((command as u32) << 16 | (0x01u32 << 8) | 0x01u32);
         sum = sum.wrapping_add(data_length);
         b[12..16].copy_from_slice(&sum.to_le_bytes());
 
@@ -188,9 +188,9 @@ impl HwInfo {
 
     pub fn chipid_val(&self) -> [u32; 4] {
         let mut ids = [0u32; 4];
-        for i in 0..4 {
+        for (i, id) in ids.iter_mut().enumerate() {
             let off = 48 + i * 4;
-            ids[i] = u32::from_le_bytes(self.bytes[off..off + 4].try_into().unwrap());
+            *id = u32::from_le_bytes(self.bytes[off..off + 4].try_into().unwrap());
         }
         ids
     }

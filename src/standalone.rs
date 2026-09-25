@@ -5,6 +5,7 @@ use std::process::Command;
 
 use crate::build_info;
 use crate::image::parser;
+use crate::uart::UartDevice;
 use crate::usb::device::AicDevice;
 
 #[cfg(windows)]
@@ -194,6 +195,24 @@ pub fn environment_report(image: Option<&Path>) -> String {
             }
         }
         Err(e) => lines.push(format!("USB scan: FAILED ({})", e)),
+    }
+
+    match UartDevice::list_ports() {
+        Ok(ports) if ports.is_empty() => lines.push("Serial ports: none found".to_string()),
+        Ok(ports) => {
+            lines.push(format!("Serial ports: {} detected", ports.len()));
+            for port in &ports {
+                let usb = match (port.vid, port.pid) {
+                    (Some(vid), Some(pid)) => format!(" usb={:04x}:{:04x}", vid, pid),
+                    _ => String::new(),
+                };
+                lines.push(format!(
+                    "  {} type={}{}",
+                    port.port_name, port.port_type, usb
+                ));
+            }
+        }
+        Err(e) => lines.push(format!("Serial ports: FAILED ({})", e)),
     }
 
     if let Some(image) = image {

@@ -1,8 +1,8 @@
 # artinchip-flash
 
-Cross-platform CLI flasher for ArtInChip SoCs.  Communicates with the
-device over USB using the CBW/CSW-based UPG protocol (reverse-engineered
-from the Luban-Lite SDK).
+Cross-platform CLI/GUI flasher for ArtInChip SoCs. Communicates with the
+device over USB (CBW/CSW-based UPG protocol) or over UART (framed transport
+tunnelling the same UPG protocol), reverse-engineered from the Luban-Lite SDK.
 
 ## Build
 
@@ -57,14 +57,73 @@ prompt until signing/notarization is configured.
 ## Usage
 
 ```
-artinchip-flash scan          # list connected ArtInChip devices
-artinchip-flash info          # query connected device (HWINFO, storage media)
+artinchip-flash scan          # list connected ArtInChip USB devices
+artinchip-flash usb-list      # list every USB device seen through libusb
+artinchip-flash serial-list   # list serial ports usable for UART updates
+artinchip-flash info          # query connected USB device (HWINFO, storage media)
 artinchip-flash info <img>    # parse .img file header and META entries
+artinchip-flash info --uart /dev/ttyUSB0        # query a device over UART
 artinchip-flash env-check [img]        # check config, USB access, and optional image
 artinchip-flash install-usb-access     # install WinUSB binding or Linux udev rule
-artinchip-flash burn <img>    # burn firmware image to device
+artinchip-flash burn <img>    # burn firmware image to device over USB
 artinchip-flash burn <img> --no-reset  # burn without resetting
+artinchip-flash burn <img> --uart /dev/ttyUSB0                 # burn over UART
+artinchip-flash burn <img> --uart auto --speed 1500000         # probe ports, then switch baud
+artinchip-flash uart-monitor /dev/ttyUSB0                      # interactive UART console
+artinchip-flash uart-monitor /dev/ttyUSB0 --enter-upg          # trigger upgrade mode, then monitor
 ```
+
+## UART firmware update
+
+The device bootloader must be built with UART upgrading enabled
+(`CONFIG_AICUPG_UART_ENABLE=y`, which selects `AIC_UART_DRV`). The board in
+this repository already ships this in
+`target/configs/d21x_d70t-128-nand_baremetal_bootloader_defconfig`.
+
+Enter UART upgrade mode on the device with one of:
+
+- `aicupg gotobl` on the running application console (reboots to the
+  bootloader; UART mode is selected when no USB host is attached), or
+- `aicupg uart 0` on the bootloader console.
+
+The tool can also do this automatically: when the UART upgrade protocol does
+not answer, it sends `aicupg gotobl` and `aicupg uart 0` to the console and
+then waits for the device, answering `AIBURNFORCE` / `AIBURNID` boot keywords
+so a board that is power-cycled or reset during the wait can also enter
+upgrade mode. Auto-enter is enabled by default and can be disabled with
+`--no-enter-upg` (CLI) or the GUI checkbox.
+
+Then run:
+
+```sh
+artinchip-flash serial-list
+artinchip-flash burn firmware.img --uart /dev/ttyUSB0
+# macOS ports are usually /dev/cu.usbserial-XXXX
+```
+
+Options:
+
+| Option | Meaning |
+|--------|---------|
+| `--uart <PORT>` | Serial port, or `auto` to probe every port |
+| `--baud <BAUD>` | Initial baudrate used to reach the bootloader (default 115200) |
+| `--speed <BAUD>` | Negotiate a higher baudrate via `SET_UART_ARGS` before burning |
+| `--no-enter-upg` | Do not try to trigger UART upgrade mode automatically |
+
+An interactive console is available for manual bring-up:
+
+```sh
+artinchip-flash uart-monitor /dev/ttyUSB0
+# type a line and press Enter to send it, Ctrl+C to exit
+artinchip-flash uart-monitor auto --enter-upg
+```
+
+`uart-monitor` also answers `AIBURNFORCE` / `AIBURNID` boot keywords, so you
+can start it, power-cycle the board, and watch it request upgrade mode.
+
+UART transfer is stop-and-wait framed (short `SOH` / long `STX` frames with
+CRC16-CCITT), so it is slower than USB; `--speed` can significantly reduce
+burn time when your adapter supports it.
 
 ## GUI
 
@@ -87,6 +146,11 @@ cargo run --bin artinchip-flash-gui
 Implemented GUI features:
 
 - USB device scan and device info display for VID `0x33C3`, PID `0x6677`.
+- Transport selector (USB or UART) with serial port list/refresh, initial
+  baudrate and optional max baudrate negotiation.
+- UART interactive monitor: stream device console output, send commands,
+  trigger upgrade mode (`aicupg gotobl` / `aicupg uart 0`) with one click, and
+  auto-enter upgrade mode when the protocol does not answer.
 - AiBurn-compatible image loading, header display, image history, component
   table, component extraction, and target partition selection.
 - AiBurn-style online burn flow with updater stage, reconnect wait,
@@ -99,7 +163,8 @@ Implemented GUI features:
 - Settings compatible with the original `AiBurn.ini` fields:
   `auto_burn`, `is_verbose`, `read_device_log`, `adb_scan`, `retry_cnt`,
   `block_err_log`, `burn_timeout`, `language`, `image_path`, and
-  `selected_parts`.
+  `selected_parts`; plus `transport`, `serial_port`, `serial_baud`, and
+  `serial_speed` for UART updates.
 - Real GUI internationalization with Simplified Chinese (`zh_cn`) and English
   (`en`), controlled by the `language` setting.
 - An advanced tools page. Native environment check and driver install are
@@ -179,11 +244,15 @@ The USB protocol is fully documented in the Luban-Lite SDK
 
 | Layer | File | Notes |
 |-------|------|-------|
-| Transport | `data_trans_layer.h` | CBW (USBC, 31 B) / CSW (USBS, 13 B), EP 0x02/0x81 |
+| Transport (USB) | `data_trans_layer.h` | CBW (USBC, 31 B) / CSW (USBS, 13 B), EP 0x02/0x81 |
+| Transport (UART) | `uart_proto_layer.c` | `SOH`/`STX` framing, CRC16-CCITT, ACK/NAK, `DC1_SEND`/`DC2_RECV` |
 | Application | `aicupg.h` | cmd_header (UPGC, 16 B), resp_header (UPGR, 16 B) |
-| Commands | `basic_cmd.c`, `fwc_cmd.c` | GET_HWINFO, SET_FWC_META, SEND_FWC_DATA, ... |
+| Commands | `basic_cmd.c`, `fwc_cmd.c` | GET_HWINFO, SET_FWC_META, SEND_FWC_DATA, SET_UART_ARGS, ... |
 | Image | `mk_image.py` | 2048 B header (AIC.FW), 512 B META entries |
 
 - VID = `0x33C3`, PID = `0x6677`
 - Bulk endpoints, no alternative setting
 - Checksum: `magic + (reserved<<24|cmd<<16|ver<<8|protocol) + data_length`
+- UART: 8N1, device sends `CAN` on init, host polls `SIG_C` and waits for `ACK`;
+  each logical buffer (CBW, payload, data, CSW) switches direction first
+  (`DC1_SEND` to send, `DC2_RECV` to receive)

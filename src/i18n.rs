@@ -134,6 +134,24 @@ pub enum Msg {
     ArtInChipImageFilter,
     Optional,
     FwcListHint,
+    Transport,
+    TransportUsb,
+    TransportUart,
+    SerialPort,
+    SerialPortAuto,
+    Refresh,
+    BaudRate,
+    MaxBaudRate,
+    NoSerialPorts,
+    SerialScanFailed,
+    UartModeHint,
+    AutoEnterUpgrade,
+    ConnectMonitor,
+    DisconnectMonitor,
+    EnterUpgradeMode,
+    Send,
+    MonitorInputHint,
+    MonitorHint,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -279,6 +297,28 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::ArtInChipImageFilter => "ArtInChip 镜像",
         Msg::Optional => "可选",
         Msg::FwcListHint => "kernel,rootfs",
+        Msg::Transport => "传输方式",
+        Msg::TransportUsb => "USB",
+        Msg::TransportUart => "串口 (UART)",
+        Msg::SerialPort => "串口",
+        Msg::SerialPortAuto => "自动检测",
+        Msg::Refresh => "刷新",
+        Msg::BaudRate => "波特率",
+        Msg::MaxBaudRate => "最高波特率",
+        Msg::NoSerialPorts => "未发现串口",
+        Msg::SerialScanFailed => "串口扫描失败",
+        Msg::UartModeHint => {
+            "提示：请先在设备上执行 `aicupg gotobl`，或在 bootloader 控制台执行 `aicupg uart 0` 进入 UART 升级模式"
+        }
+        Msg::AutoEnterUpgrade => "握手失败时自动尝试进入升级模式",
+        Msg::ConnectMonitor => "连接串口监视",
+        Msg::DisconnectMonitor => "断开监视",
+        Msg::EnterUpgradeMode => "进入升级模式",
+        Msg::Send => "发送",
+        Msg::MonitorInputHint => "输入命令后回车，例如 aicupg gotobl",
+        Msg::MonitorHint => {
+            "监视窗口可直接查看设备输出并发送命令；点击“进入升级模式”会依次发送 `aicupg gotobl` / `aicupg uart 0`"
+        }
     }
 }
 
@@ -385,5 +425,27 @@ fn en(msg: Msg) -> &'static str {
         Msg::ArtInChipImageFilter => "ArtInChip image",
         Msg::Optional => "optional",
         Msg::FwcListHint => "kernel,rootfs",
+        Msg::Transport => "Transport",
+        Msg::TransportUsb => "USB",
+        Msg::TransportUart => "UART",
+        Msg::SerialPort => "Serial port",
+        Msg::SerialPortAuto => "Auto detect",
+        Msg::Refresh => "Refresh",
+        Msg::BaudRate => "Baud rate",
+        Msg::MaxBaudRate => "Max baud",
+        Msg::NoSerialPorts => "No serial ports found",
+        Msg::SerialScanFailed => "Serial scan failed",
+        Msg::UartModeHint => {
+            "Hint: run `aicupg gotobl` on the device or `aicupg uart 0` in the bootloader console to enter UART upgrade mode"
+        }
+        Msg::AutoEnterUpgrade => "Auto enter upgrade mode on connect failure",
+        Msg::ConnectMonitor => "Connect monitor",
+        Msg::DisconnectMonitor => "Disconnect monitor",
+        Msg::EnterUpgradeMode => "Enter upgrade mode",
+        Msg::Send => "Send",
+        Msg::MonitorInputHint => "Type a command and press Enter, e.g. aicupg gotobl",
+        Msg::MonitorHint => {
+            "The monitor shows device output and sends console commands; \"Enter upgrade mode\" sends `aicupg gotobl` / `aicupg uart 0`"
+        }
     }
 }
