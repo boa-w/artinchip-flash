@@ -1853,20 +1853,66 @@ impl GuiApp {
     }
 
     fn ui_log(&mut self, ui: &mut egui::Ui) {
+        let mut copy_requested = false;
+        let mut save_requested = false;
         ui.horizontal(|ui| {
             ui.label(self.t(Msg::Log));
+            if ui.button(self.t(Msg::CopyLog)).clicked() {
+                copy_requested = true;
+            }
+            if ui.button(self.t(Msg::SaveLog)).clicked() {
+                save_requested = true;
+            }
             if ui.button(self.t(Msg::Clear)).clicked() {
                 self.log_lines.clear();
             }
         });
+        if copy_requested {
+            self.copy_log(ui.ctx());
+        }
+        if save_requested {
+            self.save_log_to_file();
+        }
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .max_height(220.0)
             .show(ui, |ui| {
                 for line in &self.log_lines {
-                    ui.monospace(line);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(line).monospace())
+                            .selectable(true),
+                    );
                 }
             });
+    }
+
+    fn copy_log(&mut self, ctx: &egui::Context) {
+        let text = self.log_lines.join("\n");
+        ctx.copy_text(text);
+        self.log(format!(
+            "{} ({} lines)",
+            self.t(Msg::LogCopied),
+            self.log_lines.len()
+        ));
+    }
+
+    fn save_log_to_file(&mut self) {
+        let default = services::default_log_path(&self.config.app_dir);
+        let dialog = rfd::FileDialog::new()
+            .set_file_name(default.file_name().and_then(|n| n.to_str()).unwrap_or(
+                "artinchip-flash.log",
+            ));
+        let dialog = match default.parent() {
+            Some(dir) => dialog.set_directory(dir),
+            None => dialog,
+        };
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        match services::write_log_file(&path, &self.log_lines) {
+            Ok(()) => self.log(format!("{} {}", self.t(Msg::LogSavedTo), path.display())),
+            Err(e) => self.log_error(e),
+        }
     }
 
     fn selected_device_label(&self) -> String {

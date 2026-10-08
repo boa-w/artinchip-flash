@@ -167,6 +167,10 @@ pub enum Msg {
     EraseAllNote,
     ForceUpgradeNote,
     EfuseId,
+    CopyLog,
+    SaveLog,
+    LogCopied,
+    LogSavedTo,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -357,6 +361,10 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::EraseAllNote => "烧录前经 upgcmd 整片擦除，需配置 upgcmd 路径；介质留空则取镜像介质 ID",
         Msg::ForceUpgradeNote => "实验性：强制升级模式且烧后不复位，需设备端开启强制升级开关",
         Msg::EfuseId => "eFuse 编号",
+        Msg::CopyLog => "复制日志",
+        Msg::SaveLog => "保存日志",
+        Msg::LogCopied => "日志已复制到剪贴板",
+        Msg::LogSavedTo => "日志已保存到",
     }
 }
 
@@ -504,6 +512,10 @@ fn en(msg: Msg) -> &'static str {
             "Experimental: force-upgrade mode without post-burn reset; the device must enable force upgrade"
         },
         Msg::EfuseId => "eFuse ID",
+        Msg::CopyLog => "Copy log",
+        Msg::SaveLog => "Save log",
+        Msg::LogCopied => "Log copied to clipboard",
+        Msg::LogSavedTo => "Log saved to",
     }
 }
 
@@ -520,6 +532,10 @@ mod tests {
                 Msg::EraseAllNote,
                 Msg::ForceUpgradeNote,
                 Msg::EfuseId,
+                Msg::CopyLog,
+                Msg::SaveLog,
+                Msg::LogCopied,
+                Msg::LogSavedTo,
                 Msg::Stop,
                 Msg::Rate,
                 Msg::Elapsed,

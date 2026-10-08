@@ -67,6 +67,9 @@ enum Commands {
         /// Path to official upgcmd(.exe) used by --erase-all
         #[arg(long, value_name = "PATH")]
         upgcmd_path: Option<PathBuf>,
+        /// Save the burn event log to a file (in addition to console output)
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<PathBuf>,
         /// Update over UART: port name, or "auto" to probe every serial port
         #[arg(
             long,
@@ -161,6 +164,7 @@ fn main() {
             erase_all,
             erase_media,
             upgcmd_path,
+            log_file,
             uart,
             baud,
             speed,
@@ -172,6 +176,7 @@ fn main() {
             erase_all,
             erase_media,
             upgcmd_path,
+            log_file,
             uart,
             baud,
             speed,
@@ -435,6 +440,7 @@ struct BurnFlags {
     erase_all: bool,
     erase_media: Option<String>,
     upgcmd_path: Option<PathBuf>,
+    log_file: Option<PathBuf>,
     uart: Option<String>,
     baud: u32,
     speed: Option<u32>,
@@ -450,6 +456,7 @@ fn cmd_burn(flags: BurnFlags) {
         erase_all,
         erase_media,
         upgcmd_path,
+        log_file,
         uart,
         baud,
         speed,
@@ -552,15 +559,44 @@ fn cmd_burn(flags: BurnFlags) {
 
     eprintln!("Press Ctrl+C to cancel the burn (aborts at the next chunk).");
     let started = Instant::now();
+    let mut log_lines: Vec<String> = Vec::new();
     let result = if let Some(port) = uart {
-        open_uart_shared(&port, baud, speed, auto_enter)
-            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json, started))
+        open_uart_shared(&port, baud, speed, auto_enter).and_then(|dev| {
+            burn_with_device(
+                dev,
+                &img_data,
+                &metas,
+                &options,
+                json,
+                started,
+                &mut log_lines,
+            )
+        })
     } else {
-        usb::device::AicDevice::open_first()
-            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json, started))
+        usb::device::AicDevice::open_first().and_then(|dev| {
+            burn_with_device(
+                dev,
+                &img_data,
+                &metas,
+                &options,
+                json,
+                started,
+                &mut log_lines,
+            )
+        })
     };
 
     let elapsed = started.elapsed();
+    if let Some(path) = &log_file {
+        if log_lines.is_empty() {
+            eprintln!("Warning: no burn events captured, --log-file not written");
+        } else {
+            match services::write_log_file(path, &log_lines) {
+                Ok(()) => eprintln!("Burn event log saved to {}", path.display()),
+                Err(e) => eprintln!("Warning: could not save burn log: {}", e),
+            }
+        }
+    }
     if let Err(e) = result {
         if e.contains("cancelled") {
             eprintln!(
@@ -588,6 +624,7 @@ fn burn_with_device<T: UpgTransport>(
     options: &BurnOptions,
     json: bool,
     started: Instant,
+    log_lines: &mut Vec<String>,
 ) -> Result<(), String> {
     println!("Transport: {}", dev.transport_name());
     match dev.device_info_lines() {
@@ -603,15 +640,17 @@ fn burn_with_device<T: UpgTransport>(
     let mut callback = |event: BurnEvent| {
         let elapsed = started.elapsed();
         if json {
-            println!("{}", burn_event_json_timed(&event, elapsed));
+            let value = burn_event_json_timed(&event, elapsed);
+            println!("{}", value);
+            log_lines.push(value.to_string());
         } else {
-            match event {
-                BurnEvent::Log(line) | BurnEvent::Stage(line) => eprintln!("{}", line),
+            let line = match event {
+                BurnEvent::Log(line) | BurnEvent::Stage(line) => line,
                 BurnEvent::ComponentStarted { name, partition, size } => {
-                    eprintln!("Meta {} partition={} size={} ...", name, partition, size)
+                    format!("Meta {} partition={} size={} ...", name, partition, size)
                 }
                 BurnEvent::ComponentProgress { name, sent, total } => {
-                    eprintln!(
+                    format!(
                         "  {}: {}/{} ({:.1}%) {} {}",
                         name,
                         sent,
@@ -622,7 +661,7 @@ fn burn_with_device<T: UpgTransport>(
                     )
                 }
                 BurnEvent::OverallProgress { sent, total } => {
-                    eprintln!(
+                    format!(
                         "  Overall: {}/{} ({:.1}%) {} {}",
                         sent,
                         total,
@@ -632,10 +671,12 @@ fn burn_with_device<T: UpgTransport>(
                     )
                 }
                 BurnEvent::ComponentFinished { name } => {
-                    eprintln!("Component done: {}", name)
+                    format!("Component done: {}", name)
                 }
-                BurnEvent::Finished => eprintln!("Burn finished {}", format_elapsed(elapsed)),
-            }
+                BurnEvent::Finished => format!("Burn finished {}", format_elapsed(elapsed)),
+            };
+            eprintln!("{}", line);
+            log_lines.push(line);
         }
     };
     dev.burn_image_with_options(img_data, metas, options, Some(&mut callback))
