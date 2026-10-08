@@ -1316,6 +1316,30 @@ impl GuiApp {
             ui.checkbox(&mut self.official_args.device_log, device_log);
             ui.checkbox(&mut self.official_args.progress, progress);
         });
+        // Transport selectors mirror official `upgcmd -d/-u/-b`; empty = default.
+        let target_device = tr(lang, Msg::Device);
+        let serial_port_label = tr(lang, Msg::SerialPort);
+        let baud_rate_label = tr(lang, Msg::BaudRate);
+        ui.horizontal(|ui| {
+            ui.label(target_device);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.official_args.device)
+                    .hint_text("bus:port")
+                    .desired_width(80.0),
+            );
+            ui.label(serial_port_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.official_args.uart_port)
+                    .hint_text("COMx")
+                    .desired_width(80.0),
+            );
+            ui.label(baud_rate_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.official_args.baudrate)
+                    .hint_text("921600")
+                    .desired_width(80.0),
+            );
+        });
 
         self.ui_official_args(ui);
         ui.separator();

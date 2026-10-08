@@ -111,6 +111,15 @@ pub struct OfficialArgs {
     pub verbose: bool,
     pub device_log: bool,
     pub progress: bool,
+    /// `upgcmd --dev bus:port` — operate on a specific USB upgrade device.
+    /// Mirrors official `upgcmd -d`; empty means "first device".
+    pub device: String,
+    /// `upgcmd --uart COMx` — route the command over UART.
+    /// Mirrors official `upgcmd -u`; empty means USB.
+    pub uart_port: String,
+    /// `upgcmd --baudrate <baud>` — max UART transmission baudrate.
+    /// Mirrors official `upgcmd -b`; empty means default.
+    pub baudrate: String,
 }
 
 impl Default for OfficialArgs {
@@ -135,6 +144,9 @@ impl Default for OfficialArgs {
             verbose: false,
             device_log: false,
             progress: true,
+            device: String::new(),
+            uart_port: String::new(),
+            baudrate: String::new(),
         }
     }
 }
@@ -149,6 +161,20 @@ pub fn build_args(args: &OfficialArgs) -> Result<Vec<String>, String> {
     }
     if args.progress {
         out.push("--progress".to_string());
+    }
+    // Transport selectors mirror official `upgcmd -d/-u/-b` and must precede
+    // the command word (`upgcmd options command arguments...`).
+    if !args.device.trim().is_empty() {
+        out.push("--dev".to_string());
+        out.push(args.device.trim().to_string());
+    }
+    if !args.uart_port.trim().is_empty() {
+        out.push("--uart".to_string());
+        out.push(args.uart_port.trim().to_string());
+    }
+    if !args.baudrate.trim().is_empty() {
+        out.push("--baudrate".to_string());
+        out.push(args.baudrate.trim().to_string());
     }
 
     match args.command {
@@ -439,4 +465,39 @@ fn split_raw_args(args: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_selectors_precede_command() {
+        let mut args = OfficialArgs::default();
+        args.command = OfficialCommand::ListDevices;
+        args.device = "1:2".to_string();
+        args.uart_port = "COM3".to_string();
+        args.baudrate = "921600".to_string();
+        let out = build_args(&args).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "--progress",
+                "--dev", "1:2",
+                "--uart", "COM3",
+                "--baudrate", "921600",
+                "--list",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_transport_selectors_are_omitted() {
+        let args = OfficialArgs::default();
+        let out = build_args(&args).unwrap();
+        assert!(!out.iter().any(|a| a == "--dev" || a == "--uart" || a == "--baudrate"));
+    }
 }

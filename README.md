@@ -88,6 +88,12 @@ installer locations (`Program Files`, `/usr/bin`, `/Applications`) re-run
 the matching `msi/setup/deb/pkg` instead of replacing binaries. The GUI
 Settings tab has channel + auto-check (24h throttle) + check-now.
 
+## Docs (中文文档)
+
+- [`docs/使用指南.md`](docs/使用指南.md) — 安装、烧录、设置、常见问题
+- [`docs/与AiBurn功能对照.md`](docs/与AiBurn功能对照.md) — 官方功能对照与路线图
+- [`docs/更新机制.md`](docs/更新机制.md) — 更新通道与发版流程
+
 ## UART firmware update
 
 The device bootloader must be built with UART upgrading enabled

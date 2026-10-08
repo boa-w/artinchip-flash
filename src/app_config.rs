@@ -26,6 +26,11 @@ pub struct AppConfig {
     pub update_channel: String,
     pub auto_check_update: bool,
     pub last_update_check_unix: u64,
+    /// Official `AiBurn.ini` compat: show burn-statistics button. Read on load,
+    /// preserved on save; the statistics window itself is on the roadmap.
+    pub show_statistic: bool,
+    /// Official `AiBurn.ini` compat: stats DB initialized flag. Preserved.
+    pub db_inited: bool,
 }
 
 impl Default for AppConfig {
@@ -55,6 +60,8 @@ impl Default for AppConfig {
             update_channel: "stable".to_string(),
             auto_check_update: true,
             last_update_check_unix: 0,
+            show_statistic: false,
+            db_inited: false,
         }
     }
 }
@@ -123,15 +130,17 @@ impl AppConfig {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
         let text = format!(
-            "[debug]\nauto_burn={}\nis_verbose={}\nread_device_log={}\nadb_scan={}\nretry_cnt={}\nblock_err_log={}\n\n[system]\nburn_timeout={}\nlanguage={}\n\n[common]\nimage_path={}\nselected_parts=\"{}\"\napp_dir={}\naiburn_dir={}\nupgcmd_path={}\ntransport={}\nserial_port={}\nserial_baud={}\nserial_speed={}\nserial_auto_enter={}\nupdate_channel={}\nauto_check_update={}\nlast_update_check_unix={}\n",
+            "[debug]\nauto_burn={}\nis_verbose={}\nread_device_log={}\nadb_scan={}\nretry_cnt={}\nblock_err_log={}\nshow_statistic={}\n\n[system]\nburn_timeout={}\nlanguage={}\ndb_inited={}\n\n[common]\nimage_path={}\nselected_parts=\"{}\"\napp_dir={}\naiburn_dir={}\nupgcmd_path={}\ntransport={}\nserial_port={}\nserial_baud={}\nserial_speed={}\nserial_auto_enter={}\nupdate_channel={}\nauto_check_update={}\nlast_update_check_unix={}\n",
             bool_to_int(self.auto_burn),
             bool_to_int(self.verbose),
             bool_to_int(self.read_device_log),
             bool_to_int(self.adb_scan),
             self.retry_count.max(1),
             bool_to_int(self.block_error_log),
+            bool_to_int(self.show_statistic),
             self.burn_timeout_secs.max(1),
             self.language,
+            bool_to_int(self.db_inited),
             image_path,
             selected,
             self.app_dir.to_string_lossy().replace('\\', "/"),
@@ -164,6 +173,8 @@ impl AppConfig {
                 self.retry_count = value.parse::<u32>().unwrap_or(self.retry_count).max(1)
             }
             ("debug", "block_err_log") => self.block_error_log = parse_bool(value),
+            ("debug", "show_statistic") => self.show_statistic = parse_bool(value),
+            ("system", "db_inited") => self.db_inited = parse_bool(value),
             ("system", "burn_timeout") => {
                 self.burn_timeout_secs = value
                     .parse::<u64>()
@@ -381,6 +392,8 @@ mod tests {
         cfg.update_channel = "nightly".to_string();
         cfg.auto_check_update = false;
         cfg.last_update_check_unix = 1234567890;
+        cfg.show_statistic = true;
+        cfg.db_inited = true;
 
         cfg.save_to(&path).unwrap();
         let loaded = AppConfig::load_from(&path).unwrap();
@@ -397,7 +410,44 @@ mod tests {
         assert_eq!(loaded.update_channel, "nightly");
         assert!(!loaded.auto_check_update);
         assert_eq!(loaded.last_update_check_unix, 1234567890);
+        assert!(loaded.show_statistic);
+        assert!(loaded.db_inited);
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn loads_official_aiburn_ini_sample() {
+        // Sample taken from the AiBurn manual (§2.5.2): only official keys exist.
+        let unique = format!(
+            "artinchip-flash-ini-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        let path = dir.join("AiBurn.ini");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "[common]\nimage_path=F:/img files/aic_per1_mmc_v1.0.0.img\n\n\
+             [debug]\nauto_burn=0\nshow_statistic=0\nis_verbose=0\nretry_cnt=1\n\n\
+             [system]\ndb_inited=1\n",
+        )
+        .unwrap();
+
+        let loaded = AppConfig::load_from(&path).unwrap();
+        assert_eq!(
+            loaded.image_path,
+            Some(PathBuf::from("F:/img files/aic_per1_mmc_v1.0.0.img"))
+        );
+        assert!(!loaded.auto_burn);
+        assert!(!loaded.show_statistic);
+        assert!(!loaded.verbose);
+        assert_eq!(loaded.retry_count, 1);
+        assert!(loaded.db_inited);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
