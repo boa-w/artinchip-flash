@@ -24,6 +24,8 @@
 | `AiBurn.ini` 兼容 | `load_from` | `image_path/auto_burn/show_statistic/is_verbose/retry_cnt/db_inited` 全读入并回存 |
 | 检查更新 | `update` / 设置页 | stable（`v*`）/nightly 双通道（见《更新机制》） |
 | 烧录速率/用时显示、停止（中止烧写） | CLI `Ctrl+C` + 速率/用时行 / GUI 停止按钮 + 状态行 | chunk 边界检查取消标志（`BurnOptions.cancel`），CLI 取消退出码 130，`--json` 带 `elapsed_secs`/`rate_bps` |
+| **全片擦除**开关（烧录页） | CLI `--erase-all/--erase-media/--upgcmd-path` / GUI 全片擦除复选框 + 介质框 | 烧录前经官方 `upgcmd flasherase` 擦除（原生擦除命令未经逆向确认，不猜协议）；介质缺省取镜像 `media_dev_id`，透传 `--dev/--uart/--baudrate` |
+| **强制升级**选项（与重启互斥） | CLI `--force-upgrade` / GUI 强制升级复选框（`BurnOptions.force_upgrade`） | `SET_UPG_CFG` 改发 `BURN_IMG_FORCE`（0x04）且跳过烧后复位；实验性，需设备端开强制升级开关（官方手册 §2.1.4），无硬件验证 |
 
 协议层（`aicupg_cmd_*`）已覆盖烧录/查询/内存/分区/日志/串口参数/JTAG 相关命令字；
 文件类操作（`write_file/read_file/delete_file/storage_erase`）复用
@@ -36,8 +38,8 @@
 | # | 官方功能 | 现状 | 计划 |
 |---|---|---|---|
 | 1 | 烧录**速率/用时**显示、**停止**（中止烧写） | 已实现（见上表） | 后续仅做文案/样式微调 |
-| 2 | **全片擦除**开关（烧录页） | 仅 `upgcmd flasherase` 透传 | P1：接到烧录前流程（存储擦除命令已具备） |
-| 3 | **强制升级**选项（与重启互斥） | 无（默认烧后重启） | P1：加 `force_upgrade` 烧录选项（对应 `UPG_MODE_BURN_IMG_FORCE`），需设备端开强制升级开关（Luban/Luban-Lite 配置见官方手册 §2.1.4）；无硬件验证前明确标注为实验性 |
+| 2 | **全片擦除**开关（烧录页） | 已实现（见上表；经 `upgcmd` 前置擦除） | 原生擦除命令确认前保持透传方案，不猜协议 |
+| 3 | **强制升级**选项（与重启互斥） | 已实现（见上表；实验性，无硬件验证） | 待真机验证后去实验性标注 |
 | 4 | **制作启动卡**（SD 枚举/GPT-MBR/格式化/MMC 镜像写卡，需管理员） | 未实现 | P2：跨平台裸盘写入工作量大（Windows `\\.\PhysicalDriveN` + GPT），先出设计文档；CLI 先做 `sd-list` 只读枚举 |
 | 5 | **数据擦写**页（进擦写模式、擦除 Boot、读/擦/写数据、eFuse 读/烧录） | 未实现 | P2：读/擦/写数据可映射到现有内存与分区命令；eFuse 官方无 `upgcmd` 直接命令，需抓包/逆向确认地域寻址协议后实现，不猜协议 |
 | 6 | **Agent 服务**（TCP 9100、串口监听推送、技能包 `burn/readlog/getstatus/sendcmd`） | 未实现 | P2：独立服务模块 + JSON 线协议文档；技能包放 `skill/` 目录 |

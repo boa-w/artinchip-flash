@@ -82,6 +82,9 @@ also `ARTINCHIP_FLASH_VERBOSE=1`), `--json` (machine-readable `scan`,
 `burn` shows live rate + elapsed on both CLI and GUI, and `Ctrl+C` (CLI)
 or the Stop button (GUI) cancels at the next chunk boundary, leaving the
 device in upgrade mode so you can retry (CLI exit code `130`).
+`burn --force-upgrade` selects experimental `BURN_IMG_FORCE` mode without
+post-burn reset; `burn --erase-all` runs official `upgcmd flasherase`
+before the native burn (native erase is not reverse-engineered).
 
 ## Updates
 
@@ -183,6 +186,9 @@ Implemented GUI features:
   `FULL_DISK_UPGRADE`, `image.info`, selected target components, upgrade end,
   progress events, CRC checks, and optional reset; GUI shows live rate/elapsed
   plus a Stop button, CLI supports `Ctrl+C` cancel.
+- Burn options: experimental force-upgrade mode (`BURN_IMG_FORCE`, no reset)
+  and pre-burn full-chip erase via the official `upgcmd flasherase` backend
+  (GUI checkboxes, CLI `--force-upgrade` / `--erase-all`).
 - Standalone environment check for USB access, config directory writability,
   selected image parsing, and driver readiness.
 - Built-in USB access setup: Windows WinUSB INF installation through `pnputil`,

@@ -9,6 +9,7 @@ use std::time::Instant;
 use artinchip_flash::build_info;
 use artinchip_flash::device::{BurnEvent, BurnOptions, UpgDevice};
 use artinchip_flash::image;
+use artinchip_flash::official;
 use artinchip_flash::protocol::commands::FwcMeta;
 use artinchip_flash::services::{self, UartSpec};
 use artinchip_flash::standalone;
@@ -52,6 +53,20 @@ enum Commands {
         /// Do not reset device after burn
         #[arg(long)]
         no_reset: bool,
+        /// Experimental force upgrade (BURN_IMG_FORCE, skips post-burn reset).
+        /// Requires the device-side force-upgrade switch; unverified hardware.
+        #[arg(long)]
+        force_upgrade: bool,
+        /// Erase the whole chip via `upgcmd flasherase` before burning.
+        /// Needs --upgcmd-path (or the Windows default AiBurn install).
+        #[arg(long)]
+        erase_all: bool,
+        /// Media id for --erase-all; defaults to the image media_dev_id
+        #[arg(long, value_name = "ID")]
+        erase_media: Option<String>,
+        /// Path to official upgcmd(.exe) used by --erase-all
+        #[arg(long, value_name = "PATH")]
+        upgcmd_path: Option<PathBuf>,
         /// Update over UART: port name, or "auto" to probe every serial port
         #[arg(
             long,
@@ -142,11 +157,27 @@ fn main() {
         Commands::Burn {
             image,
             no_reset,
+            force_upgrade,
+            erase_all,
+            erase_media,
+            upgcmd_path,
             uart,
             baud,
             speed,
             no_enter_upg,
-        } => cmd_burn(image, no_reset, uart, baud, speed, !no_enter_upg, cli.json),
+        } => cmd_burn(BurnFlags {
+            image,
+            no_reset,
+            force_upgrade,
+            erase_all,
+            erase_media,
+            upgcmd_path,
+            uart,
+            baud,
+            speed,
+            auto_enter: !no_enter_upg,
+            json: cli.json,
+        }),
         Commands::UartMonitor {
             port,
             baud,
@@ -160,6 +191,23 @@ fn main() {
 
 fn open_uart_shared(port: &str, baud: u32, speed: Option<u32>, auto_enter: bool) -> Result<artinchip_flash::uart::UartDevice, String> {
     services::open_uart(&UartSpec::new(port, baud, speed, auto_enter))
+}
+
+/// Default official `upgcmd` path used by `--erase-all` when the caller did
+/// not pass `--upgcmd-path`. Mirrors the GUI compat default: Windows tries
+/// `C:\ArtInChip\AiBurn\upgcmd.exe`, other platforms have no default and the
+/// caller must pass the flag explicitly.
+fn default_upgcmd_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        artinchip_flash::app_config::compat_tool_path(std::path::Path::new(
+            r"C:\ArtInChip\AiBurn",
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::new()
+    }
 }
 
 fn cmd_uart_monitor(port: String, baud: u32, enter_upg: bool) {
@@ -379,15 +427,35 @@ fn cmd_info(
     }
 }
 
-fn cmd_burn(
-    image_path: PathBuf,
+/// CLI `burn` flags bundled so `cmd_burn` stays under the argument limit.
+struct BurnFlags {
+    image: PathBuf,
     no_reset: bool,
+    force_upgrade: bool,
+    erase_all: bool,
+    erase_media: Option<String>,
+    upgcmd_path: Option<PathBuf>,
     uart: Option<String>,
     baud: u32,
     speed: Option<u32>,
     auto_enter: bool,
     json: bool,
-) {
+}
+
+fn cmd_burn(flags: BurnFlags) {
+    let BurnFlags {
+        image: image_path,
+        no_reset,
+        force_upgrade,
+        erase_all,
+        erase_media,
+        upgcmd_path,
+        uart,
+        baud,
+        speed,
+        auto_enter,
+        json,
+    } = flags;
     // 1. Read image file
     let img_data = match fs::read(&image_path) {
         Ok(d) => d,
@@ -415,6 +483,58 @@ fn cmd_burn(
         img_data.len()
     );
 
+    if force_upgrade {
+        eprintln!(
+            "Note: --force-upgrade is experimental (BURN_IMG_FORCE, no post-burn reset); \
+             the device must enable force upgrade (official manual §2.1.4)."
+        );
+    }
+
+    // 2b. Optional pre-burn full-chip erase via the official backend.
+    // Native erase is not implemented (UPG erase command unconfirmed), so this
+    // reuses `upgcmd flasherase` *before* the native burn opens the device.
+    if erase_all {
+        let media = erase_media
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| header.media_dev_id().to_string());
+        let upgcmd = upgcmd_path.unwrap_or_else(default_upgcmd_path);
+        if upgcmd.as_os_str().is_empty() {
+            eprintln!(
+                "Error: --erase-all needs --upgcmd-path (no default upgcmd on this platform)"
+            );
+            std::process::exit(1);
+        }
+        let (erase_uart, erase_baud) = match (&uart, speed) {
+            (Some(port), _) if !port.eq_ignore_ascii_case("auto") => {
+                (port.clone(), speed.map(|b| b.to_string()).unwrap_or_default())
+            }
+            (Some(_), _) => (String::new(), speed.map(|b| b.to_string()).unwrap_or_default()),
+            (None, _) => (String::new(), String::new()),
+        };
+        eprintln!("Erasing chip (flasherase media {}) ...", media);
+        match official::run_pre_burn_erase(
+            &upgcmd,
+            &media,
+            Some(&image_path),
+            "",
+            &erase_uart,
+            &erase_baud,
+        ) {
+            Ok(text) => {
+                for line in text.lines() {
+                    eprintln!("  [flasherase] {}", line);
+                }
+            }
+            Err(e) => {
+                eprintln!("Pre-burn erase failed, aborting burn: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let flag = cancel.clone();
@@ -424,7 +544,8 @@ fn cmd_burn(
         });
     }
     let options = BurnOptions {
-        reset_after_burn: !no_reset,
+        reset_after_burn: !no_reset && !force_upgrade,
+        force_upgrade,
         cancel: Some(cancel),
         ..Default::default()
     };

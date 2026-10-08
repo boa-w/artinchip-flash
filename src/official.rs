@@ -467,6 +467,53 @@ fn split_raw_args(args: &str) -> Vec<String> {
     out
 }
 
+/// Build the `upgcmd flasherase` argument list for the pre-burn erase stage.
+///
+/// Native full-chip erase is not implemented (the UPG erase command is not
+/// reverse-engineered; see docs/与AiBurn功能对照.md): the burn frontends run
+/// this official backend *before* opening the device natively. Transport
+/// selectors use the same `upgcmd -d/-u/-b`透传 as [`build_args`]; empty
+/// strings mean "default". `media` is required by `flasherase`; callers fall
+/// back to the image header's `media_dev_id` when the user did not pick one.
+pub fn pre_burn_erase_args(
+    media: &str,
+    image: Option<&Path>,
+    device: &str,
+    uart_port: &str,
+    baudrate: &str,
+) -> Result<Vec<String>, String> {
+    let media = media.trim();
+    if media.is_empty() {
+        return Err("Missing media id for full-chip erase".to_string());
+    }
+    let args = OfficialArgs {
+        command: OfficialCommand::FlashErase,
+        media: media.to_string(),
+        image: image.map(|p| p.to_path_buf()),
+        device: device.to_string(),
+        uart_port: uart_port.to_string(),
+        baudrate: baudrate.to_string(),
+        ..Default::default()
+    };
+    build_args(&args)
+}
+
+/// Run the pre-burn full-chip erase via the official `upgcmd` backend.
+///
+/// Must be called *before* the native burn opens the device, so the
+/// subprocess owns the USB/UART connection without lock contention.
+pub fn run_pre_burn_erase(
+    upgcmd: &Path,
+    media: &str,
+    image: Option<&Path>,
+    device: &str,
+    uart_port: &str,
+    baudrate: &str,
+) -> Result<String, String> {
+    let args = pre_burn_erase_args(media, image, device, uart_port, baudrate)?;
+    run_upgcmd(upgcmd, &args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +546,35 @@ mod tests {
         let args = OfficialArgs::default();
         let out = build_args(&args).unwrap();
         assert!(!out.iter().any(|a| a == "--dev" || a == "--uart" || a == "--baudrate"));
+    }
+
+    #[test]
+    fn pre_burn_erase_passes_media_image_and_selectors() {
+        let out = pre_burn_erase_args(
+            "0",
+            Some(Path::new("fw.img")),
+            "1:2",
+            "COM3",
+            "921600",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "--progress",
+                "--dev", "1:2",
+                "--uart", "COM3",
+                "--baudrate", "921600",
+                "flasherase", "0", "fw.img",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pre_burn_erase_rejects_empty_media() {
+        assert!(pre_burn_erase_args("", None, "", "", "").is_err());
     }
 }

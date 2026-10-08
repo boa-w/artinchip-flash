@@ -162,6 +162,10 @@ pub enum Msg {
     Stop,
     Rate,
     Elapsed,
+    EraseAll,
+    ForceUpgrade,
+    EraseAllNote,
+    ForceUpgradeNote,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -339,6 +343,10 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::Stop => "停止",
         Msg::Rate => "速率",
         Msg::Elapsed => "用时",
+        Msg::EraseAll => "全片擦除",
+        Msg::ForceUpgrade => "强制升级",
+        Msg::EraseAllNote => "烧录前经 upgcmd 整片擦除，需配置 upgcmd 路径；介质留空则取镜像介质 ID",
+        Msg::ForceUpgradeNote => "实验性：强制升级模式且烧后不复位，需设备端开启强制升级开关",
     }
 }
 
@@ -477,5 +485,35 @@ fn en(msg: Msg) -> &'static str {
         Msg::Stop => "Stop",
         Msg::Rate => "Rate",
         Msg::Elapsed => "Elapsed",
+        Msg::EraseAll => "Erase all",
+        Msg::ForceUpgrade => "Force upgrade",
+        Msg::EraseAllNote => {
+            "Runs upgcmd flasherase before burning; needs the upgcmd path. Empty media uses the image media ID"
+        }
+        Msg::ForceUpgradeNote => {
+            "Experimental: force-upgrade mode without post-burn reset; the device must enable force upgrade"
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burn_option_labels_translate_in_both_languages() {
+        for lang in Language::ALL {
+            for msg in [
+                Msg::EraseAll,
+                Msg::ForceUpgrade,
+                Msg::EraseAllNote,
+                Msg::ForceUpgradeNote,
+                Msg::Stop,
+                Msg::Rate,
+                Msg::Elapsed,
+            ] {
+                assert!(!tr(lang, msg).is_empty(), "{:?} for {:?}", msg, lang);
+            }
+        }
     }
 }

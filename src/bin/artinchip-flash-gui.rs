@@ -505,7 +505,39 @@ impl GuiApp {
             }
         }
         let selected_parts = self.selected_parts.clone();
-        let reset_after_burn = true;
+        let force_upgrade = self.config.force_upgrade;
+        let erase_all = self.config.erase_all;
+        let erase_media_cfg = self.config.erase_media.clone();
+        let upgcmd_path = self.config.upgcmd_path.clone();
+        let erase_baud = if self.config.serial_speed > 0 {
+            self.config.serial_speed.to_string()
+        } else {
+            String::new()
+        };
+        // Transport selectors for the pre-burn erase (`upgcmd -d/-u/-b`透传):
+        // USB passes the selected device as `bus:port`, UART passes the port.
+        let erase_device = selected_device
+            .as_ref()
+            .map(|d| {
+                let port = if d.port_path.is_empty() {
+                    d.address.to_string()
+                } else {
+                    d.port_path.clone()
+                };
+                format!("{}:{}", d.bus_number, port)
+            })
+            .unwrap_or_default();
+        let erase_uart = if use_uart {
+            let port = self.selected_serial_port_name();
+            if port.eq_ignore_ascii_case("auto") || port.trim().is_empty() {
+                String::new()
+            } else {
+                port
+            }
+        } else {
+            String::new()
+        };
+        let reset_after_burn = !force_upgrade;
         let timeout = Duration::from_secs(self.config.burn_timeout_secs.max(1));
         let adb_scan = self.config.adb_scan && !use_uart;
         let aiburn_dir = self.config.aiburn_dir.clone();
@@ -567,12 +599,47 @@ impl GuiApp {
                     }
                     thread::sleep(Duration::from_millis(700));
                 }
-                let (data, _header, metas, _summary) = parser::read_image(&path)?;
+                let (data, header, metas, _summary) = parser::read_image(&path)?;
+                if force_upgrade {
+                    let _ = tx.send(WorkerEvent::ToolOutput(
+                        tr(lang, Msg::ForceUpgradeNote).to_string(),
+                    ));
+                }
+                // Pre-burn full-chip erase via the official backend (same
+                // `upgcmd flasherase`透传 as the Tools page). Native erase is
+                // not implemented, so this runs *before* opening the device.
+                if erase_all {
+                    let media = if erase_media_cfg.trim().is_empty() {
+                        header.media_dev_id().to_string()
+                    } else {
+                        erase_media_cfg.trim().to_string()
+                    };
+                    let _ = tx.send(WorkerEvent::ToolOutput(format!(
+                        "flasherase media {} ...",
+                        media
+                    )));
+                    match official::run_pre_burn_erase(
+                        &upgcmd_path,
+                        &media,
+                        Some(&path),
+                        &erase_device,
+                        &erase_uart,
+                        &erase_baud,
+                    ) {
+                        Ok(text) => {
+                            let _ = tx.send(WorkerEvent::ToolOutput(text));
+                        }
+                        Err(e) => {
+                            return Err(format!("Pre-burn erase failed, burn aborted: {}", e));
+                        }
+                    }
+                }
                 let options = BurnOptions {
                     selected_parts,
                     reset_after_burn,
                     burn_timeout: timeout,
                     cancel: Some(cancel),
+                    force_upgrade,
                 };
                 let mut callback = |event| {
                     let _ = tx.send(WorkerEvent::Burn(event));
@@ -1030,6 +1097,9 @@ impl GuiApp {
         let auto_burn = self.t(Msg::AutoBurn);
         let adb_scan = self.t(Msg::AdbScan);
         let read_device_log = self.t(Msg::ReadDeviceLog);
+        let erase_all = self.t(Msg::EraseAll);
+        let force_upgrade = self.t(Msg::ForceUpgrade);
+        let media_label = self.t(Msg::Media);
         let burn = self.t(Msg::TabBurn);
         let stop = self.t(Msg::Stop);
         let mut stop_requested = false;
@@ -1048,6 +1118,32 @@ impl GuiApp {
             ui.checkbox(&mut self.config.adb_scan, adb_scan);
             ui.checkbox(&mut self.config.read_device_log, read_device_log);
         });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!self.busy, |ui| {
+                ui.checkbox(&mut self.config.erase_all, erase_all);
+                ui.checkbox(&mut self.config.force_upgrade, force_upgrade);
+            });
+            ui.label(media_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.config.erase_media)
+                    .hint_text("auto")
+                    .desired_width(64.0),
+            );
+        });
+        if self.config.erase_all {
+            ui.label(
+                egui::RichText::new(self.t(Msg::EraseAllNote))
+                    .small()
+                    .weak(),
+            );
+        }
+        if self.config.force_upgrade {
+            ui.label(
+                egui::RichText::new(self.t(Msg::ForceUpgradeNote))
+                    .small()
+                    .weak(),
+            );
+        }
         if stop_requested {
             self.stop_burn();
         }

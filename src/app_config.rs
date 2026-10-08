@@ -31,6 +31,16 @@ pub struct AppConfig {
     pub show_statistic: bool,
     /// Official `AiBurn.ini` compat: stats DB initialized flag. Preserved.
     pub db_inited: bool,
+    /// Burn page: run `upgcmd flasherase` before the native burn.
+    /// Extension key (`[common] erase_all`); official builds ignore it.
+    pub erase_all: bool,
+    /// Burn page: experimental force upgrade (`UPG_MODE_BURN_IMG_FORCE`,
+    /// mutually exclusive with post-burn reset).
+    /// Extension key (`[common] force_upgrade`); official builds ignore it.
+    pub force_upgrade: bool,
+    /// Media id for the pre-burn erase; empty means "take it from the image
+    /// header's `media_dev_id`". Extension key (`[common] erase_media`).
+    pub erase_media: String,
 }
 
 impl Default for AppConfig {
@@ -62,6 +72,9 @@ impl Default for AppConfig {
             last_update_check_unix: 0,
             show_statistic: false,
             db_inited: false,
+            erase_all: false,
+            force_upgrade: false,
+            erase_media: String::new(),
         }
     }
 }
@@ -130,7 +143,7 @@ impl AppConfig {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
         let text = format!(
-            "[debug]\nauto_burn={}\nis_verbose={}\nread_device_log={}\nadb_scan={}\nretry_cnt={}\nblock_err_log={}\nshow_statistic={}\n\n[system]\nburn_timeout={}\nlanguage={}\ndb_inited={}\n\n[common]\nimage_path={}\nselected_parts=\"{}\"\napp_dir={}\naiburn_dir={}\nupgcmd_path={}\ntransport={}\nserial_port={}\nserial_baud={}\nserial_speed={}\nserial_auto_enter={}\nupdate_channel={}\nauto_check_update={}\nlast_update_check_unix={}\n",
+            "[debug]\nauto_burn={}\nis_verbose={}\nread_device_log={}\nadb_scan={}\nretry_cnt={}\nblock_err_log={}\nshow_statistic={}\n\n[system]\nburn_timeout={}\nlanguage={}\ndb_inited={}\n\n[common]\nimage_path={}\nselected_parts=\"{}\"\napp_dir={}\naiburn_dir={}\nupgcmd_path={}\ntransport={}\nserial_port={}\nserial_baud={}\nserial_speed={}\nserial_auto_enter={}\nupdate_channel={}\nauto_check_update={}\nlast_update_check_unix={}\nerase_all={}\nforce_upgrade={}\nerase_media={}\n",
             bool_to_int(self.auto_burn),
             bool_to_int(self.verbose),
             bool_to_int(self.read_device_log),
@@ -153,7 +166,10 @@ impl AppConfig {
             bool_to_int(self.serial_auto_enter),
             self.update_channel,
             bool_to_int(self.auto_check_update),
-            self.last_update_check_unix
+            self.last_update_check_unix,
+            bool_to_int(self.erase_all),
+            bool_to_int(self.force_upgrade),
+            self.erase_media,
         );
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -240,6 +256,15 @@ impl AppConfig {
             }
             ("common", "last_update_check_unix") => {
                 self.last_update_check_unix = value.parse::<u64>().unwrap_or(0);
+            }
+            ("common", "erase_all") | ("debug", "erase_all") => {
+                self.erase_all = parse_bool(value);
+            }
+            ("common", "force_upgrade") | ("debug", "force_upgrade") => {
+                self.force_upgrade = parse_bool(value);
+            }
+            ("common", "erase_media") => {
+                self.erase_media = value.to_string();
             }
             _ => {}
         }
@@ -394,6 +419,9 @@ mod tests {
         cfg.last_update_check_unix = 1234567890;
         cfg.show_statistic = true;
         cfg.db_inited = true;
+        cfg.erase_all = true;
+        cfg.force_upgrade = true;
+        cfg.erase_media = "0".to_string();
 
         cfg.save_to(&path).unwrap();
         let loaded = AppConfig::load_from(&path).unwrap();
@@ -412,6 +440,9 @@ mod tests {
         assert_eq!(loaded.last_update_check_unix, 1234567890);
         assert!(loaded.show_statistic);
         assert!(loaded.db_inited);
+        assert!(loaded.erase_all);
+        assert!(loaded.force_upgrade);
+        assert_eq!(loaded.erase_media, "0");
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

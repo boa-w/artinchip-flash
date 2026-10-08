@@ -26,6 +26,13 @@ pub struct BurnOptions {
     /// at the next chunk boundary and returns a "cancelled" error, leaving
     /// the device in upgrade mode so the user can retry.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Experimental force upgrade (AiBurn "强制升级").
+    ///
+    /// Uses `UPG_MODE_BURN_IMG_FORCE` instead of `UPG_MODE_FULL_DISK_UPGRADE`
+    /// and skips the post-burn reset (the two are mutually exclusive).
+    /// Requires the device-side force-upgrade switch (Luban/Luban-Lite
+    /// config, official manual §2.1.4); not verified on hardware.
+    pub force_upgrade: bool,
 }
 
 impl Default for BurnOptions {
@@ -38,7 +45,28 @@ impl Default for BurnOptions {
             reset_after_burn: true,
             burn_timeout: Duration::from_secs(60),
             cancel: None,
+            force_upgrade: false,
         }
+    }
+}
+
+/// Upgrade-mode byte for `SET_UPG_CFG` derived from burn options.
+///
+/// Pure helper so frontends and tests can assert the mode without a device.
+pub fn upg_mode(options: &BurnOptions) -> u8 {
+    if options.force_upgrade {
+        UPG_MODE_BURN_IMG_FORCE
+    } else {
+        UPG_MODE_FULL_DISK_UPGRADE
+    }
+}
+
+/// Human-readable upgrade-mode name for stage logs.
+pub fn upg_mode_name(options: &BurnOptions) -> &'static str {
+    if options.force_upgrade {
+        "force upgrade mode (BURN_IMG_FORCE, experimental)"
+    } else {
+        "full-disk upgrade mode"
     }
 }
 
@@ -479,9 +507,9 @@ impl<T: UpgTransport> UpgDevice<T> {
 
         emit(
             &mut callback,
-            BurnEvent::Stage("Set full-disk upgrade mode".to_string()),
+            BurnEvent::Stage(format!("Set {} upgrade mode", upg_mode_name(options))),
         );
-        self.set_upg_cfg(UPG_MODE_FULL_DISK_UPGRADE)?;
+        self.set_upg_cfg(upg_mode(options))?;
 
         if let Some(info) = classified
             .iter()
@@ -525,7 +553,18 @@ impl<T: UpgTransport> UpgDevice<T> {
 
         emit(&mut callback, BurnEvent::Stage("End upgrade".to_string()));
         self.set_upg_end()?;
-        if options.reset_after_burn {
+        // Force upgrade and post-burn reset are mutually exclusive: the
+        // device stays in upgrade mode so the forced image can be verified.
+        let do_reset = options.reset_after_burn && !options.force_upgrade;
+        if options.force_upgrade {
+            emit(
+                &mut callback,
+                BurnEvent::Log(
+                    "Force upgrade: skipping reset (mutually exclusive)".to_string(),
+                ),
+            );
+        }
+        if do_reset {
             emit(&mut callback, BurnEvent::Stage("Reset device".to_string()));
             if let Err(e) = self.reset() {
                 emit(
@@ -760,6 +799,10 @@ mod tests {
         reads: usize,
         panic_on_use: bool,
         max_chunk: usize,
+        /// `SET_UPG_CFG` mode bytes observed on the wire (32-byte cfg payload).
+        upg_modes: Vec<u8>,
+        /// Whether any write payload contained the `reset` shell command.
+        saw_reset: bool,
     }
 
     impl MockTransport {
@@ -783,13 +826,19 @@ mod tests {
     impl UpgTransport for MockTransport {
         fn write_txn(
             &mut self,
-            _payload: &[u8],
+            payload: &[u8],
             _policy: CswPolicy,
         ) -> Result<Option<AicCsw>, String> {
             if self.panic_on_use {
                 panic!("mock transport must not be touched after cancellation");
             }
             self.writes += 1;
+            if payload.len() == 32 && payload[1..] == OFFICIAL_UPG_CFG_RESERVED {
+                self.upg_modes.push(payload[0]);
+            }
+            if payload.windows(5).any(|w| w == b"reset") {
+                self.saw_reset = true;
+            }
             Ok(Some(Self::ok_csw()))
         }
 
@@ -858,12 +907,15 @@ mod tests {
             reset_after_burn: false,
             burn_timeout: Duration::from_secs(5),
             cancel: Some(flag),
+            force_upgrade: false,
         };
         let mut dev = UpgDevice::new(MockTransport {
             writes: 0,
             reads: 0,
             panic_on_use: true,
             max_chunk: 512,
+            upg_modes: Vec::new(),
+            saw_reset: false,
         });
         let mut events = Vec::new();
         let mut cb = |e: BurnEvent| events.push(format!("{:?}", e));
@@ -884,12 +936,15 @@ mod tests {
             reset_after_burn: false,
             burn_timeout: Duration::from_secs(5),
             cancel: Some(flag.clone()),
+            force_upgrade: false,
         };
         let mut dev = UpgDevice::new(MockTransport {
             writes: 0,
             reads: 0,
             panic_on_use: false,
             max_chunk: 512,
+            upg_modes: Vec::new(),
+            saw_reset: false,
         });
         let mut progress_events = 0usize;
         let mut cb = |event: BurnEvent| {
@@ -907,6 +962,86 @@ mod tests {
         assert!(
             dev.transport_mut().writes >= 1,
             "expected at least one chunk before cancel"
+        );
+    }
+
+    #[test]
+    fn upg_mode_selects_force_upgrade_byte() {
+        assert_eq!(upg_mode(&BurnOptions::default()), UPG_MODE_FULL_DISK_UPGRADE);
+        let force = BurnOptions {
+            force_upgrade: true,
+            ..Default::default()
+        };
+        assert_eq!(upg_mode(&force), UPG_MODE_BURN_IMG_FORCE);
+    }
+
+    #[test]
+    fn default_burn_uses_full_disk_mode_and_resets() {
+        let img = vec![0xABu8; 1024];
+        let crc = crc32fast::hash(&img[0..1024]);
+        let metas = vec![make_meta("image.target.os", "os", 0, 1024, crc)];
+        let options = BurnOptions {
+            selected_parts: vec!["os".to_string()],
+            reset_after_burn: true,
+            burn_timeout: Duration::from_secs(5),
+            cancel: None,
+            force_upgrade: false,
+        };
+        let mut dev = UpgDevice::new(MockTransport {
+            writes: 0,
+            reads: 0,
+            panic_on_use: false,
+            max_chunk: 4096,
+            upg_modes: Vec::new(),
+            saw_reset: false,
+        });
+        dev.burn_image_with_options(&img, &metas, &options, None)
+            .expect("mock burn must succeed");
+        assert_eq!(dev.transport_mut().upg_modes, vec![UPG_MODE_FULL_DISK_UPGRADE]);
+        assert!(
+            dev.transport_mut().saw_reset,
+            "default burn must reset the device"
+        );
+    }
+
+    #[test]
+    fn force_upgrade_uses_force_mode_and_skips_reset() {
+        let img = vec![0xABu8; 1024];
+        let crc = crc32fast::hash(&img[0..1024]);
+        let metas = vec![make_meta("image.target.os", "os", 0, 1024, crc)];
+        // Even with reset_after_burn=true, force upgrade wins (mutually exclusive).
+        let options = BurnOptions {
+            selected_parts: vec!["os".to_string()],
+            reset_after_burn: true,
+            burn_timeout: Duration::from_secs(5),
+            cancel: None,
+            force_upgrade: true,
+        };
+        let mut dev = UpgDevice::new(MockTransport {
+            writes: 0,
+            reads: 0,
+            panic_on_use: false,
+            max_chunk: 4096,
+            upg_modes: Vec::new(),
+            saw_reset: false,
+        });
+        let mut logs = Vec::new();
+        let mut cb = |e: BurnEvent| {
+            if let BurnEvent::Log(line) = e {
+                logs.push(line);
+            }
+        };
+        dev.burn_image_with_options(&img, &metas, &options, Some(&mut cb))
+            .expect("mock force burn must succeed");
+        assert_eq!(dev.transport_mut().upg_modes, vec![UPG_MODE_BURN_IMG_FORCE]);
+        assert!(
+            !dev.transport_mut().saw_reset,
+            "force upgrade must skip the post-burn reset"
+        );
+        assert!(
+            logs.iter().any(|l| l.contains("skipping reset")),
+            "expected a skipping-reset note, got: {:?}",
+            logs
         );
     }
 }
