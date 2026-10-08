@@ -102,6 +102,7 @@ Settings tab has channel + auto-check (24h throttle) + check-now.
 - [`docs/与AiBurn功能对照.md`](docs/与AiBurn功能对照.md) — 官方功能对照与路线图
 - [`docs/更新机制.md`](docs/更新机制.md) — 更新通道与发版流程
 - [`docs/eFuse分析与实现.md`](docs/eFuse分析与实现.md) — eFuse Bank 表、命令证据与实现状态
+- [`docs/擦写模式对照.md`](docs/擦写模式对照.md) — 数据擦写六操作与 bulk 会话的完整对照
 
 ## UART firmware update
 
