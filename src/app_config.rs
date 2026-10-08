@@ -23,6 +23,9 @@ pub struct AppConfig {
     pub serial_baud: u32,
     pub serial_speed: u32,
     pub serial_auto_enter: bool,
+    pub update_channel: String,
+    pub auto_check_update: bool,
+    pub last_update_check_unix: u64,
 }
 
 impl Default for AppConfig {
@@ -49,6 +52,9 @@ impl Default for AppConfig {
             serial_baud: 115200,
             serial_speed: 0,
             serial_auto_enter: true,
+            update_channel: "stable".to_string(),
+            auto_check_update: true,
+            last_update_check_unix: 0,
         }
     }
 }
@@ -117,29 +123,7 @@ impl AppConfig {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
         let text = format!(
-            "[debug]\n\
-auto_burn={}\n\
-is_verbose={}\n\
-read_device_log={}\n\
-adb_scan={}\n\
-retry_cnt={}\n\
-block_err_log={}\n\
-\n\
-[system]\n\
-burn_timeout={}\n\
-language={}\n\
-\n\
-[common]\n\
-image_path={}\n\
-selected_parts=\"{}\"\n\
-app_dir={}\n\
-aiburn_dir={}\n\
-upgcmd_path={}\n\
-transport={}\n\
-serial_port={}\n\
-serial_baud={}\n\
-serial_speed={}\n\
-serial_auto_enter={}\n",
+            "[debug]\nauto_burn={}\nis_verbose={}\nread_device_log={}\nadb_scan={}\nretry_cnt={}\nblock_err_log={}\n\n[system]\nburn_timeout={}\nlanguage={}\n\n[common]\nimage_path={}\nselected_parts=\"{}\"\napp_dir={}\naiburn_dir={}\nupgcmd_path={}\ntransport={}\nserial_port={}\nserial_baud={}\nserial_speed={}\nserial_auto_enter={}\nupdate_channel={}\nauto_check_update={}\nlast_update_check_unix={}\n",
             bool_to_int(self.auto_burn),
             bool_to_int(self.verbose),
             bool_to_int(self.read_device_log),
@@ -157,7 +141,10 @@ serial_auto_enter={}\n",
             self.serial_port,
             self.serial_baud.max(1200),
             self.serial_speed,
-            bool_to_int(self.serial_auto_enter)
+            bool_to_int(self.serial_auto_enter),
+            self.update_channel,
+            bool_to_int(self.auto_check_update),
+            self.last_update_check_unix
         );
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -229,6 +216,19 @@ serial_auto_enter={}\n",
             }
             ("common", "serial_auto_enter") | ("common", "uart_auto_enter") => {
                 self.serial_auto_enter = parse_bool(value);
+            }
+            ("common", "update_channel") => {
+                self.update_channel = if value.eq_ignore_ascii_case("nightly") {
+                    "nightly".to_string()
+                } else {
+                    "stable".to_string()
+                };
+            }
+            ("common", "auto_check_update") => {
+                self.auto_check_update = parse_bool(value);
+            }
+            ("common", "last_update_check_unix") => {
+                self.last_update_check_unix = value.parse::<u64>().unwrap_or(0);
             }
             _ => {}
         }
@@ -378,6 +378,9 @@ mod tests {
         cfg.serial_baud = 921600;
         cfg.serial_speed = 1500000;
         cfg.serial_auto_enter = false;
+        cfg.update_channel = "nightly".to_string();
+        cfg.auto_check_update = false;
+        cfg.last_update_check_unix = 1234567890;
 
         cfg.save_to(&path).unwrap();
         let loaded = AppConfig::load_from(&path).unwrap();
@@ -391,6 +394,9 @@ mod tests {
         assert_eq!(loaded.serial_baud, 921600);
         assert_eq!(loaded.serial_speed, 1500000);
         assert!(!loaded.serial_auto_enter);
+        assert_eq!(loaded.update_channel, "nightly");
+        assert!(!loaded.auto_check_update);
+        assert_eq!(loaded.last_update_check_unix, 1234567890);
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

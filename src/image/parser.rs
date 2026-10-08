@@ -342,28 +342,29 @@ pub fn extract_components(image_path: &Path, output_dir: &Path) -> Result<Vec<Pa
     Ok(written)
 }
 
-pub fn print_image_info(data: &[u8]) -> Result<(), String> {
+pub fn format_image_info(data: &[u8]) -> Result<String, String> {
     let (header, metas, _payload) = parse_image(data)?;
 
-    println!("=== Image Header ===");
-    println!("  Magic:       {}", header.magic_str());
-    println!("  Platform:    {}", header.platform_str());
-    println!("  Product:     {}", header.product_str());
-    println!("  Version:     {}", header.version_str());
-    println!("  Media type:  {}", header.media_type_str());
-    println!("  Media dev:   {:#x}", header.media_dev_id());
-    println!("  Meta offset: {:#x}", header.meta_offset_val());
-    println!(
+    let mut out = Vec::new();
+    out.push("=== Image Header ===".to_string());
+    out.push(format!("  Magic:       {}", header.magic_str()));
+    out.push(format!("  Platform:    {}", header.platform_str()));
+    out.push(format!("  Product:     {}", header.product_str()));
+    out.push(format!("  Version:     {}", header.version_str()));
+    out.push(format!("  Media type:  {}", header.media_type_str()));
+    out.push(format!("  Media dev:   {:#x}", header.media_dev_id()));
+    out.push(format!("  Meta offset: {:#x}", header.meta_offset_val()));
+    out.push(format!(
         "  Meta count:  {}",
         meta_size_to_count(header.meta_size_val())
-    );
-    println!("  File offset: {:#x}", header.file_offset_val());
-    println!("  File size:   {}", header.file_size_val());
+    ));
+    out.push(format!("  File offset: {:#x}", header.file_offset_val()));
+    out.push(format!("  File size:   {}", header.file_size_val()));
 
-    println!();
-    println!("=== META Entries ({}) ===", metas.len());
+    out.push(String::new());
+    out.push(format!("=== META Entries ({}) ===", metas.len()));
     for (i, meta) in metas.iter().enumerate() {
-        println!(
+        out.push(format!(
             "  [{:2}] {} (partition: {}, offset={:#x}, size={}, crc=0x{:08x}, ram={:#x}, attr='{}')",
             i,
             meta.name_str(),
@@ -373,9 +374,14 @@ pub fn print_image_info(data: &[u8]) -> Result<(), String> {
             meta.crc_val(),
             meta.ram_val(),
             meta.attr_str(),
-        );
+        ));
     }
 
+    Ok(out.join("\n"))
+}
+
+pub fn print_image_info(data: &[u8]) -> Result<(), String> {
+    println!("{}", format_image_info(data)?);
     Ok(())
 }
 

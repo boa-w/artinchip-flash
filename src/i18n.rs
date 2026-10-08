@@ -152,6 +152,13 @@ pub enum Msg {
     Send,
     MonitorInputHint,
     MonitorHint,
+    CheckUpdate,
+    UpdateChannel,
+    AutoCheckUpdate,
+    UpdateAvailable,
+    UpToDate,
+    OpenReleasePage,
+    CheckingUpdate,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -319,6 +326,13 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::MonitorHint => {
             "监视窗口可直接查看设备输出并发送命令；点击“进入升级模式”会依次发送 `aicupg gotobl` / `aicupg uart 0`"
         }
+        Msg::CheckUpdate => "检查更新",
+        Msg::UpdateChannel => "更新通道",
+        Msg::AutoCheckUpdate => "启动时自动检查更新",
+        Msg::UpdateAvailable => "发现新版本",
+        Msg::UpToDate => "已是最新版本",
+        Msg::OpenReleasePage => "打开下载页",
+        Msg::CheckingUpdate => "正在检查更新...",
     }
 }
 
@@ -447,5 +461,12 @@ fn en(msg: Msg) -> &'static str {
         Msg::MonitorHint => {
             "The monitor shows device output and sends console commands; \"Enter upgrade mode\" sends `aicupg gotobl` / `aicupg uart 0`"
         }
+        Msg::CheckUpdate => "Check for updates",
+        Msg::UpdateChannel => "Update channel",
+        Msg::AutoCheckUpdate => "Auto check on startup",
+        Msg::UpdateAvailable => "Update available",
+        Msg::UpToDate => "Up to date",
+        Msg::OpenReleasePage => "Open release page",
+        Msg::CheckingUpdate => "Checking for updates...",
     }
 }

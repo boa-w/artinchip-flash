@@ -2,14 +2,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use artinchip_flash::build_info;
-use artinchip_flash::device::{BurnOptions, UpgDevice};
+use artinchip_flash::device::{BurnEvent, BurnOptions, UpgDevice};
 use artinchip_flash::image;
 use artinchip_flash::protocol::commands::FwcMeta;
+use artinchip_flash::services::{self, UartSpec};
 use artinchip_flash::standalone;
 use artinchip_flash::transport::UpgTransport;
-use artinchip_flash::uart::transport::UartOptions;
-use artinchip_flash::uart::UartDevice;
+use artinchip_flash::update::{self, UpdateChannel};
 use artinchip_flash::usb;
+use artinchip_flash::verbosity;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -20,6 +21,12 @@ use clap::{Parser, Subcommand};
     about = "Cross-platform flasher for ArtInChip SoCs"
 )]
 struct Cli {
+    /// Verbose transport-level logging (CBW/CSW bytes, UART framing)
+    #[arg(long, global = true)]
+    verbose: bool,
+    /// Machine-readable JSON output (scan, update)
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -101,15 +108,25 @@ enum Commands {
     },
     /// Install platform USB access support (WinUSB INF or Linux udev rule)
     InstallUsbAccess,
+    /// Check for updates from GitHub Releases
+    Update {
+        /// Update channel: stable (default, semver `v*` releases) or nightly
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        /// Open the release page in the default browser when an update exists
+        #[arg(long)]
+        open: bool,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
+    verbosity::set_verbose(cli.verbose || std::env::var("ARTINCHIP_FLASH_VERBOSE").is_ok());
 
     match cli.command {
-        Commands::Scan => cmd_scan(),
-        Commands::UsbList => cmd_usb_list(),
-        Commands::SerialList => cmd_serial_list(),
+        Commands::Scan => cmd_scan(cli.json),
+        Commands::UsbList => cmd_usb_list(cli.json),
+        Commands::SerialList => cmd_serial_list(cli.json),
         Commands::Info {
             image,
             uart,
@@ -124,7 +141,7 @@ fn main() {
             baud,
             speed,
             no_enter_upg,
-        } => cmd_burn(image, no_reset, uart, baud, speed, !no_enter_upg),
+        } => cmd_burn(image, no_reset, uart, baud, speed, !no_enter_upg, cli.json),
         Commands::UartMonitor {
             port,
             baud,
@@ -132,30 +149,12 @@ fn main() {
         } => cmd_uart_monitor(port, baud, enter_upg),
         Commands::EnvCheck { image } => cmd_env_check(image),
         Commands::InstallUsbAccess => cmd_install_usb_access(),
+        Commands::Update { channel, open } => cmd_update(&channel, open, cli.json),
     }
 }
 
-fn uart_options(baud: u32, speed: Option<u32>, auto_enter: bool) -> UartOptions {
-    UartOptions {
-        baudrate: baud,
-        max_baudrate: speed.filter(|speed| *speed > baud),
-        auto_enter,
-        ..Default::default()
-    }
-}
-
-fn open_uart(
-    port: &str,
-    baud: u32,
-    speed: Option<u32>,
-    auto_enter: bool,
-) -> Result<UartDevice, String> {
-    let options = uart_options(baud, speed, auto_enter);
-    if port.eq_ignore_ascii_case("auto") {
-        UartDevice::open_auto(options)
-    } else {
-        UartDevice::open_port(port, options)
-    }
+fn open_uart_shared(port: &str, baud: u32, speed: Option<u32>, auto_enter: bool) -> Result<artinchip_flash::uart::UartDevice, String> {
+    services::open_uart(&UartSpec::new(port, baud, speed, auto_enter))
 }
 
 fn cmd_uart_monitor(port: String, baud: u32, enter_upg: bool) {
@@ -165,9 +164,25 @@ fn cmd_uart_monitor(port: String, baud: u32, enter_upg: bool) {
     }
 }
 
-fn cmd_serial_list() {
-    match UartDevice::list_ports() {
+fn cmd_serial_list(json: bool) {
+    match artinchip_flash::uart::UartDevice::list_ports() {
         Ok(ports) => {
+            if json {
+                let items: Vec<serde_json::Value> = ports
+                    .iter()
+                    .map(|port| {
+                        serde_json::json!({
+                            "port": port.port_name,
+                            "type": port.port_type,
+                            "vid": port.vid,
+                            "pid": port.pid,
+                            "product": port.product,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::json!({ "ports": items }));
+                return;
+            }
             if ports.is_empty() {
                 println!("No serial ports found.");
                 return;
@@ -196,9 +211,27 @@ fn cmd_serial_list() {
     }
 }
 
-fn cmd_usb_list() {
+fn cmd_usb_list(json: bool) {
     match usb::device::AicDevice::list_usb_devices() {
         Ok(devices) => {
+            if json {
+                let items: Vec<serde_json::Value> = devices
+                    .iter()
+                    .map(|device| {
+                        serde_json::json!({
+                            "bus": device.bus_number,
+                            "address": device.address,
+                            "vid": format!("{:04x}", device.vendor_id),
+                            "pid": format!("{:04x}", device.product_id),
+                            "class": device.class_code,
+                            "speed": device.speed,
+                            "path": device.port_path,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::json!({ "devices": items }));
+                return;
+            }
             if devices.is_empty() {
                 println!("No USB devices found.");
                 return;
@@ -232,13 +265,36 @@ fn cmd_usb_list() {
     }
 }
 
-fn cmd_scan() {
+fn cmd_scan(json: bool) {
     match usb::device::AicDevice::scan_devices() {
         Ok(devices) if devices.is_empty() => {
+            if json {
+                println!("{}", serde_json::json!({ "devices": [] }));
+                return;
+            }
             eprintln!("No ArtInChip device found (VID=0x33C3, PID=0x6677)");
             std::process::exit(1);
         }
         Ok(devices) => {
+            if json {
+                let items: Vec<serde_json::Value> = devices
+                    .iter()
+                    .map(|device| {
+                        serde_json::json!({
+                            "bus": device.bus_number,
+                            "address": device.address,
+                            "path": device.port_path,
+                            "vid": format!("{:04x}", device.vendor_id),
+                            "pid": format!("{:04x}", device.product_id),
+                            "speed": device.speed,
+                            "ready": device.ready,
+                            "status": device.status,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::json!({ "devices": items }));
+                return;
+            }
             println!("Detected {} ArtInChip device(s):", devices.len());
             for device in &devices {
                 println!(
@@ -271,14 +327,15 @@ fn cmd_info(
     auto_enter: bool,
 ) {
     if let Some(path) = image {
-        // Parse local image file
+        // Parse local image file (shared formatter, no direct lib printing).
         match fs::read(&path) {
-            Ok(data) => {
-                if let Err(e) = image::parser::print_image_info(&data) {
+            Ok(data) => match image::parser::format_image_info(&data) {
+                Ok(text) => println!("{}", text),
+                Err(e) => {
                     eprintln!("Error parsing image: {}", e);
                     std::process::exit(1);
                 }
-            }
+            },
             Err(e) => {
                 eprintln!("Error reading '{}': {}", path.display(), e);
                 std::process::exit(1);
@@ -288,9 +345,11 @@ fn cmd_info(
     }
 
     let result = if let Some(port) = uart {
-        open_uart(&port, baud, speed, auto_enter).and_then(|mut dev| {
+        open_uart_shared(&port, baud, speed, auto_enter).and_then(|mut dev| {
             println!("=== Device Info ({}) ===", dev.transport_name());
-            dev.show_info()?;
+            for line in dev.device_info_lines()? {
+                println!("  {}", line);
+            }
             if let Ok(media) = dev.get_storage_media() {
                 println!("  Storage media: {}", media);
             }
@@ -299,7 +358,9 @@ fn cmd_info(
     } else {
         usb::device::AicDevice::open_first().and_then(|mut dev| {
             println!("=== Device Info (USB) ===");
-            dev.show_info()?;
+            for line in dev.device_info_lines()? {
+                println!("  {}", line);
+            }
             if let Ok(media) = dev.get_storage_media() {
                 println!("  Storage media: {}", media);
             }
@@ -320,6 +381,7 @@ fn cmd_burn(
     baud: u32,
     speed: Option<u32>,
     auto_enter: bool,
+    json: bool,
 ) {
     // 1. Read image file
     let img_data = match fs::read(&image_path) {
@@ -354,11 +416,11 @@ fn cmd_burn(
     };
 
     let result = if let Some(port) = uart {
-        open_uart(&port, baud, speed, auto_enter)
-            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options))
+        open_uart_shared(&port, baud, speed, auto_enter)
+            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json))
     } else {
         usb::device::AicDevice::open_first()
-            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options))
+            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json))
     };
 
     if let Err(e) = result {
@@ -374,12 +436,73 @@ fn burn_with_device<T: UpgTransport>(
     img_data: &[u8],
     metas: &[FwcMeta],
     options: &BurnOptions,
+    json: bool,
 ) -> Result<(), String> {
     println!("Transport: {}", dev.transport_name());
-    if let Err(e) = dev.show_info() {
-        eprintln!("Warning: could not read device info: {}", e);
+    match dev.device_info_lines() {
+        Ok(lines) => {
+            for line in lines {
+                println!("  {}", line);
+            }
+        }
+        Err(e) => eprintln!("Warning: could not read device info: {}", e),
     }
-    dev.burn_image_with_options(img_data, metas, options, None)
+    // Library emits structured events; CLI renders them (previously the library
+    // printed directly, which GUI could not reuse).
+    let mut callback = |event: BurnEvent| {
+        if json {
+            println!("{}", burn_event_json(&event));
+        } else {
+            match event {
+                BurnEvent::Log(line) | BurnEvent::Stage(line) => eprintln!("{}", line),
+                BurnEvent::ComponentStarted { name, partition, size } => {
+                    eprintln!("Meta {} partition={} size={} ...", name, partition, size)
+                }
+                BurnEvent::ComponentProgress { name, sent, total } => {
+                    eprintln!(
+                        "  {}: {}/{} ({:.1}%)",
+                        name,
+                        sent,
+                        total,
+                        services::progress_ratio(sent, total) * 100.0
+                    )
+                }
+                BurnEvent::OverallProgress { sent, total } => {
+                    eprintln!(
+                        "  Overall: {}/{} ({:.1}%)",
+                        sent,
+                        total,
+                        services::progress_ratio(sent, total) * 100.0
+                    )
+                }
+                BurnEvent::ComponentFinished { name } => {
+                    eprintln!("Component done: {}", name)
+                }
+                BurnEvent::Finished => eprintln!("Burn finished"),
+            }
+        }
+    };
+    dev.burn_image_with_options(img_data, metas, options, Some(&mut callback))
+}
+
+fn burn_event_json(event: &BurnEvent) -> serde_json::Value {
+    match event {
+        BurnEvent::Log(line) => serde_json::json!({ "type": "log", "line": line }),
+        BurnEvent::Stage(line) => serde_json::json!({ "type": "stage", "line": line }),
+        BurnEvent::ComponentStarted { name, partition, size } => {
+            serde_json::json!({ "type": "component_started", "name": name, "partition": partition, "size": size })
+        }
+        BurnEvent::ComponentProgress { name, sent, total } => {
+            serde_json::json!({ "type": "component_progress", "name": name, "sent": sent, "total": total })
+        }
+        BurnEvent::OverallProgress { sent, total } => {
+            serde_json::json!({ "type": "overall_progress", "sent": sent, "total": total })
+        }
+        BurnEvent::ComponentFinished { name } => {
+            serde_json::json!({ "type": "component_finished", "name": name })
+        }
+        BurnEvent::Finished => serde_json::json!({ "type": "finished" }),
+    }
 }
 
 fn cmd_env_check(image: Option<PathBuf>) {
@@ -391,6 +514,54 @@ fn cmd_install_usb_access() {
         Ok(()) => println!("USB access setup completed."),
         Err(e) => {
             eprintln!("USB access setup failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_update(channel: &str, open: bool, json: bool) {
+    let channel = UpdateChannel::from_str(channel);
+    match update::check(channel) {
+        Ok(status) => {
+            if json {
+                println!("{}", status.to_json());
+            } else {
+                println!("{}", status.summary_line());
+                println!("Channel: {}", status.channel.as_str());
+                println!("Current: {} ({})", status.current_version, status.current_commit);
+                println!("Latest:  {}", status.latest_tag);
+                println!("Page:    {}", status.html_url);
+                if !status.notes_preview.is_empty() {
+                    println!("--- release notes (preview) ---");
+                    println!("{}", status.notes_preview);
+                }
+                if status.update_available {
+                    if update::is_portable_install() {
+                        println!("This looks like a portable checkout; download the matching archive from the page above.");
+                    } else {
+                        println!("Installer-managed location detected; re-run the matching installer (msi/setup/deb/pkg) instead of replacing binaries.");
+                    }
+                }
+            }
+            if open && status.update_available {
+                if let Err(e) = update::open_url(&status.html_url) {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+            if status.update_available {
+                std::process::exit(10);
+            }
+        }
+        Err(e) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "error": e, "channel": channel.as_str() })
+                );
+            } else {
+                eprintln!("{}", e);
+            }
             std::process::exit(1);
         }
     }

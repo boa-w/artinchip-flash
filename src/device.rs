@@ -1,6 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
+use crate::log_verbose;
 use crate::protocol::cbw_csw::*;
 use crate::protocol::commands::*;
 use crate::transport::{CswPolicy, UpgTransport};
@@ -151,7 +152,7 @@ impl<T: UpgTransport> UpgDevice<T> {
         let header_data = match self.read_txn_policy(RESP_MIN_HDR_LEN as u32, policy) {
             Ok(data) => data,
             Err(e) if policy == CswPolicy::AllowMissing => {
-                eprintln!("  << No UPG response accepted by transaction policy: {}", e);
+                log_verbose!("  << No UPG response accepted by transaction policy: {}", e);
                 return Ok(UpgResponse {
                     payload: Vec::new(),
                 });
@@ -169,7 +170,7 @@ impl<T: UpgTransport> UpgDevice<T> {
             match self.read_txn_policy(payload_len as u32, policy) {
                 Ok(data) => data,
                 Err(e) if policy == CswPolicy::AllowMissing => {
-                    eprintln!("  << No UPG payload accepted by transaction policy: {}", e);
+                    log_verbose!("  << No UPG payload accepted by transaction policy: {}", e);
                     Vec::new()
                 }
                 Err(e) => return Err(e),
@@ -200,7 +201,7 @@ impl<T: UpgTransport> UpgDevice<T> {
             ));
         }
         if resp.command() != 0 && resp.command() != expected_cmd {
-            eprintln!(
+            log_verbose!(
                 "  << Warning: response command 0x{:02x} does not match request 0x{:02x}",
                 resp.command(),
                 expected_cmd
@@ -221,22 +222,31 @@ impl<T: UpgTransport> UpgDevice<T> {
         })
     }
 
-    pub fn device_info_text(&mut self) -> Result<String, String> {
+    /// Structured device info lines shared by CLI printing and GUI display.
+    ///
+    /// Previously `show_info()` printed directly, forcing GUI to capture
+    /// stdout. Callers now render these lines themselves.
+    pub fn device_info_lines(&mut self) -> Result<Vec<String>, String> {
         let hwinfo = self.get_hwinfo()?;
         let chipid = hwinfo.chipid_val();
-        let mut lines = Vec::new();
-        lines.push(format!("Magic:        {}", hwinfo.magic_str()));
-        lines.push(format!("Init mode:    {:#x}", hwinfo.init_mode()));
-        lines.push(format!("Current mode: {:#x}", hwinfo.curr_mode()));
-        lines.push(format!("Boot stage:   {}", hwinfo.boot_stage()));
-        lines.push(format!(
-            "Chip ID:      {:08x} {:08x} {:08x} {:08x}",
-            chipid[0], chipid[1], chipid[2], chipid[3]
-        ));
+        let mut lines = vec![
+            format!("Magic:        {}", hwinfo.magic_str()),
+            format!("Init mode:    {:#x}", hwinfo.init_mode()),
+            format!("Current mode: {:#x}", hwinfo.curr_mode()),
+            format!("Boot stage:   {}", hwinfo.boot_stage()),
+            format!(
+                "Chip ID:      {:08x} {:08x} {:08x} {:08x}",
+                chipid[0], chipid[1], chipid[2], chipid[3]
+            ),
+        ];
         if let Ok(media) = self.get_storage_media() {
             lines.push(format!("Storage media: {}", media));
         }
-        Ok(lines.join("\n"))
+        Ok(lines)
+    }
+
+    pub fn device_info_text(&mut self) -> Result<String, String> {
+        Ok(self.device_info_lines()?.join("\n"))
     }
 
     pub fn set_upg_cfg(&mut self, mode: u8) -> Result<(), String> {
@@ -329,16 +339,9 @@ impl<T: UpgTransport> UpgDevice<T> {
     }
 
     pub fn show_info(&mut self) -> Result<(), String> {
-        let hwinfo = self.get_hwinfo()?;
-        let chipid = hwinfo.chipid_val();
-        println!("  Magic:        {}", hwinfo.magic_str());
-        println!("  Init mode:    {:#x}", hwinfo.init_mode());
-        println!("  Current mode: {:#x}", hwinfo.curr_mode());
-        println!("  Boot stage:   {}", hwinfo.boot_stage());
-        println!(
-            "  Chip ID:      {:08x} {:08x} {:08x} {:08x}",
-            chipid[0], chipid[1], chipid[2], chipid[3]
-        );
+        for line in self.device_info_lines()? {
+            println!("  {}", line);
+        }
         Ok(())
     }
 
@@ -360,7 +363,10 @@ impl<T: UpgTransport> UpgDevice<T> {
         mut callback: Option<&mut BurnCallback<'_>>,
     ) -> Result<(), String> {
         let classified = classify_components(metas, &options.selected_parts);
-        print_burn_plan(&classified);
+        for line in burn_plan_lines(&classified) {
+            emit(&mut callback, BurnEvent::Log(line));
+        }
+        log_verbose!("{}", burn_plan_lines(&classified).join("\n"));
         emit(
             &mut callback,
             BurnEvent::Stage("Build component plan".to_string()),
@@ -378,7 +384,6 @@ impl<T: UpgTransport> UpgDevice<T> {
             .filter(|c| c.kind == ComponentKind::Updater)
             .count();
         if updater_count > 0 {
-            eprintln!("Start burn online: sending updater components...");
             emit(
                 &mut callback,
                 BurnEvent::Stage("Send updater components".to_string()),
@@ -400,7 +405,6 @@ impl<T: UpgTransport> UpgDevice<T> {
                 )?;
                 if index < updater_last_index {
                     thread::sleep(UPDATER_PROBE_DELAY);
-                    eprintln!("Probing bootloader between updater components...");
                     emit(
                         &mut callback,
                         BurnEvent::Stage("Probe bootloader between updater components".to_string()),
@@ -413,13 +417,11 @@ impl<T: UpgTransport> UpgDevice<T> {
                     }
                 }
             }
-            eprintln!("Updater stage complete; waiting for bootloader upgrade reconnect...");
             emit(
                 &mut callback,
                 BurnEvent::Stage("Wait for bootloader reconnect".to_string()),
             );
             if let Err(e) = self.transport.reconnect(options.burn_timeout) {
-                eprintln!("Warning: updater reconnect was not observed: {}", e);
                 emit(
                     &mut callback,
                     BurnEvent::Log(format!(
@@ -428,7 +430,6 @@ impl<T: UpgTransport> UpgDevice<T> {
                     )),
                 );
             }
-            eprintln!("Probing bootloader after reconnect...");
             emit(
                 &mut callback,
                 BurnEvent::Stage("Probe bootloader after reconnect".to_string()),
@@ -437,12 +438,15 @@ impl<T: UpgTransport> UpgDevice<T> {
                 return Err(format!("Bootloader probe after reconnect failed: {}", e));
             }
         } else {
-            eprintln!(
-                "No updater components found; continuing with target stage on current connection."
+            emit(
+                &mut callback,
+                BurnEvent::Log(
+                    "No updater components found; continuing with target stage on current connection."
+                        .to_string(),
+                ),
             );
         }
 
-        eprintln!("Setting upgrade mode to FULL_DISK_UPGRADE...");
         emit(
             &mut callback,
             BurnEvent::Stage("Set full-disk upgrade mode".to_string()),
@@ -462,7 +466,6 @@ impl<T: UpgTransport> UpgDevice<T> {
                 &mut callback,
             )?;
         } else {
-            eprintln!("Warning: no image.info component found");
             emit(
                 &mut callback,
                 BurnEvent::Log("Warning: no image.info component found".to_string()),
@@ -487,7 +490,6 @@ impl<T: UpgTransport> UpgDevice<T> {
             )?;
         }
 
-        eprintln!("Ending upgrade...");
         emit(&mut callback, BurnEvent::Stage("End upgrade".to_string()));
         self.set_upg_end()?;
         if options.reset_after_burn {
@@ -531,14 +533,6 @@ impl<T: UpgTransport> UpgDevice<T> {
             ));
         }
 
-        eprintln!(
-            "  Meta: {} (partition={}, offset={:#x}, size={}, crc=0x{:08x})",
-            name,
-            meta.partition_str(),
-            offset,
-            size,
-            crc_expected
-        );
         emit(
             callback,
             BurnEvent::ComponentStarted {
@@ -547,11 +541,25 @@ impl<T: UpgTransport> UpgDevice<T> {
                 size,
             },
         );
+        emit(
+            callback,
+            BurnEvent::Log(format!(
+                "Meta: {} (partition={}, offset={:#x}, size={}, crc=0x{:08x})",
+                name,
+                meta.partition_str(),
+                offset,
+                size,
+                crc_expected
+            )),
+        );
 
         self.set_fwc_meta(meta)?;
 
         let block_size = self.get_block_size().unwrap_or(2048);
-        eprintln!("    Block size: {}", block_size);
+        emit(
+            callback,
+            BurnEvent::Log(format!("Block size: {}", block_size)),
+        );
 
         self.start_fwc_data(size)?;
 
@@ -563,7 +571,7 @@ impl<T: UpgTransport> UpgDevice<T> {
         };
         let transport_chunk = self.transport.max_write_chunk(block_size);
         let chunk_max = base_chunk.min(transport_chunk).max(1);
-        eprintln!(
+        log_verbose!(
             "    Write chunk: {} bytes ({})",
             chunk_max,
             self.transport.transport_name()
@@ -577,8 +585,13 @@ impl<T: UpgTransport> UpgDevice<T> {
             self.write_fwc_data_chunk(chunk_data, CswPolicy::Required)?;
             data_sent += chunk_size;
             *overall_sent += chunk_size;
-            let pct = (data_sent as f64 / size as f64) * 100.0;
-            eprintln!("    {}: {}/{} ({:.1}%)", name, data_sent, size, pct);
+            log_verbose!(
+                "    {}: {}/{} ({:.1}%)",
+                name,
+                data_sent,
+                size,
+                (data_sent as f64 / size as f64) * 100.0
+            );
             emit(
                 callback,
                 BurnEvent::ComponentProgress {
@@ -605,10 +618,6 @@ impl<T: UpgTransport> UpgDevice<T> {
 
         let actual_crc = crc32fast::hash(&img_data[offset..end]);
         if actual_crc != crc_expected {
-            eprintln!(
-                "    WARNING: CRC mismatch! expected=0x{:08x}, actual=0x{:08x}",
-                crc_expected, actual_crc
-            );
             emit(
                 callback,
                 BurnEvent::Log(format!(
@@ -617,7 +626,10 @@ impl<T: UpgTransport> UpgDevice<T> {
                 )),
             );
         } else {
-            eprintln!("    CRC OK (0x{:08x})", actual_crc);
+            emit(
+                callback,
+                BurnEvent::Log(format!("CRC OK (0x{:08x})", actual_crc)),
+            );
         }
         emit(
             callback,
@@ -682,17 +694,18 @@ fn target_part_selected(meta: &FwcMeta, selected_parts: &[String]) -> bool {
         .any(|part| partition == part || target_name == part || meta.name_str() == part)
 }
 
-fn print_burn_plan(components: &[FirmwareComponent<'_>]) {
-    eprintln!("AiBurn-style component plan:");
+fn burn_plan_lines(components: &[FirmwareComponent<'_>]) -> Vec<String> {
+    let mut lines = vec!["AiBurn-style component plan:".to_string()];
     for component in components {
-        eprintln!(
+        lines.push(format!(
             "  {:?}: {} partition={} selected={}",
             component.kind,
             component.meta.name_str(),
             component.meta.partition_str(),
             component.selected
-        );
+        ));
     }
+    lines
 }
 
 fn emit(callback: &mut Option<&mut BurnCallback<'_>>, event: BurnEvent) {

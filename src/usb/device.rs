@@ -11,6 +11,7 @@ use fs2::FileExt;
 use rusb::{DeviceHandle, UsbContext};
 
 use crate::device::UpgDevice;
+use crate::log_verbose;
 use crate::protocol::cbw_csw::*;
 use crate::transport::{CswPolicy, UpgTransport};
 
@@ -227,13 +228,13 @@ impl UsbTransport {
                 if let Ok(desc) = device.config_descriptor(0) {
                     for iface in desc.interfaces() {
                         for desc in iface.descriptors() {
-                            eprintln!(
+                            log_verbose!(
                                 "  Interface {}: {} endpoints",
                                 desc.interface_number(),
                                 desc.num_endpoints()
                             );
                             for ep in desc.endpoint_descriptors() {
-                                eprintln!(
+                                log_verbose!(
                                     "    EP 0x{:02x} {} max_packet={}",
                                     ep.address(),
                                     if ep.direction() == rusb::Direction::In {
@@ -263,7 +264,7 @@ impl UsbTransport {
                 if recover_endpoints {
                     let _ = transport.handle.clear_halt(BULK_OUT_EP);
                     let _ = transport.handle.clear_halt(BULK_IN_EP);
-                    eprintln!(
+                    log_verbose!(
                         "  Cleared halt on EP 0x{:02x} and 0x{:02x}",
                         BULK_OUT_EP, BULK_IN_EP
                     );
@@ -319,7 +320,7 @@ impl UsbTransport {
     }
 
     fn wait_reconnect(&mut self, timeout: Duration) -> Result<(), String> {
-        eprintln!("Waiting for ArtInChip device to reconnect...");
+        log_verbose!("Waiting for ArtInChip device to reconnect...");
         let old_bus = self.bus_number;
         let old_address = self.address;
         let deadline = Instant::now() + timeout;
@@ -330,7 +331,7 @@ impl UsbTransport {
                 match Self::has_device_at(old_bus, old_address) {
                     Ok(false) => {
                         old_device_gone = true;
-                        eprintln!("  Previous device {}:{} disappeared", old_bus, old_address);
+                        log_verbose!("  Previous device {}:{} disappeared", old_bus, old_address);
                     }
                     Ok(true) => {
                         thread::sleep(Duration::from_millis(100));
@@ -343,7 +344,7 @@ impl UsbTransport {
             if old_device_gone {
                 match self.reopen() {
                     Ok(()) => {
-                        eprintln!(
+                        log_verbose!(
                             "Device reconnected at {}:{}.",
                             self.bus_number, self.address
                         );
@@ -371,9 +372,9 @@ impl UsbTransport {
                         break;
                     }
                     total += n;
-                    eprintln!("  Flushed {} stale bytes from IN EP", n);
+                    log_verbose!("  Flushed {} stale bytes from IN EP", n);
                     if total >= max_bytes {
-                        eprintln!("  Stopped IN flush after {} bytes", total);
+                        log_verbose!("  Stopped IN flush after {} bytes", total);
                         break;
                     }
                 }
@@ -401,7 +402,7 @@ impl UsbTransport {
 
         let cbw = AicCbw::new_write(tag, payload.len() as u32);
         let cbw_bytes = cbw.to_bytes();
-        eprintln!(
+        log_verbose!(
             "  >> WRITE CBW tag={} len={} cbw={:02x?}",
             tag,
             payload.len(),
@@ -409,12 +410,12 @@ impl UsbTransport {
         );
         self.write_bulk(cbw_bytes)?;
         if !payload.is_empty() {
-            eprintln!("  >> DATA len={}", payload.len());
+            log_verbose!("  >> DATA len={}", payload.len());
             self.write_bulk_data_phase(payload)?;
         }
         let csw = self.read_csw(tag, policy)?;
         if let Some(csw) = &csw {
-            eprintln!(
+            log_verbose!(
                 "  << CSW tag={} status={} residue={} sig=0x{:08x}",
                 csw.tag_val(),
                 csw.status_val(),
@@ -430,7 +431,7 @@ impl UsbTransport {
         let tag = self.next_tag();
 
         let cbw = AicCbw::new_read(tag, read_len);
-        eprintln!(
+        log_verbose!(
             "  >> READ CBW tag={} len={} cbw={:02x?}",
             tag,
             read_len,
@@ -439,11 +440,11 @@ impl UsbTransport {
         self.write_bulk(cbw.to_bytes())?;
 
         let data = self.read_exact_from_in(read_len as usize, TIMEOUT_MS)?;
-        eprintln!("  << DATA {} bytes", data.len());
+        log_verbose!("  << DATA {} bytes", data.len());
 
         let csw = self.read_csw(tag, policy)?;
         if let Some(csw) = &csw {
-            eprintln!(
+            log_verbose!(
                 "  << CSW tag={} status={} residue={} sig=0x{:08x}",
                 csw.tag_val(),
                 csw.status_val(),
@@ -488,7 +489,7 @@ impl UsbTransport {
                         && Instant::now() < deadline =>
                 {
                     attempts += 1;
-                    eprintln!(
+                    log_verbose!(
                         "  >> DATA start retry #{} after endpoint settle: {}",
                         attempts, e
                     );
@@ -503,7 +504,7 @@ impl UsbTransport {
         let mut buf = [0u8; 64 * 1024];
         let n = self.handle.read_bulk(BULK_IN_EP, &mut buf, timeout)?;
         if n > 0 {
-            eprintln!("  << IN EP raw {} bytes: {:02x?}", n, &buf[..n.min(128)]);
+            log_verbose!("  << IN EP raw {} bytes: {:02x?}", n, &buf[..n.min(128)]);
             self.in_buf.extend_from_slice(&buf[..n]);
         }
         Ok(n)
@@ -526,7 +527,7 @@ impl UsbTransport {
             let remaining = deadline.saturating_duration_since(now);
             match self.read_bulk_to_buffer(remaining.min(TIMEOUT_MS)) {
                 Ok(0) => {}
-                Ok(n) => eprintln!(
+                Ok(n) => log_verbose!(
                     "  << DATA buffered {} bytes (buffer={}/{})",
                     n,
                     self.in_buf.len(),
@@ -578,13 +579,13 @@ impl UsbTransport {
         loop {
             if let Some(pos) = self.find_csw_signature() {
                 if pos > 0 {
-                    eprintln!("  << Dropping {} non-CSW stale bytes before USBS", pos);
+                    log_verbose!("  << Dropping {} non-CSW stale bytes before USBS", pos);
                     self.in_buf.drain(..pos);
                 }
                 if self.in_buf.len() < 13 {
                     if let Err(e) = self.fill_until(deadline, 13) {
                         if policy == CswPolicy::AllowMissing {
-                            eprintln!("  << Incomplete CSW accepted by transaction policy: {}", e);
+                            log_verbose!("  << Incomplete CSW accepted by transaction policy: {}", e);
                             self.in_buf.clear();
                             return Ok(None);
                         }
@@ -594,7 +595,7 @@ impl UsbTransport {
                 }
                 let csw = AicCsw::from_bytes(&self.in_buf[..13])
                     .ok_or_else(|| "Failed to parse CSW".to_string())?;
-                eprintln!(
+                log_verbose!(
                     "  << CSW candidate sig=0x{:08x} tag={} status={} residue={}",
                     csw.signature(),
                     csw.tag_val(),
@@ -607,7 +608,7 @@ impl UsbTransport {
                     return Ok(Some(csw));
                 }
 
-                eprintln!(
+                log_verbose!(
                     "  << Discarding stale CSW tag={} while expecting tag={}",
                     csw.tag_val(),
                     expected_tag
@@ -618,13 +619,13 @@ impl UsbTransport {
             if !self.in_buf.is_empty() && self.in_buf.len() > 3 {
                 let keep = self.in_buf.split_off(self.in_buf.len() - 3);
                 let dropped = std::mem::replace(&mut self.in_buf, keep).len();
-                eprintln!("  << Dropping {} bytes without CSW signature", dropped);
+                log_verbose!("  << Dropping {} bytes without CSW signature", dropped);
             }
 
             let now = Instant::now();
             if now >= deadline {
                 if policy == CswPolicy::AllowMissing {
-                    eprintln!("  << No CSW before timeout; accepted by transaction policy");
+                    log_verbose!("  << No CSW before timeout; accepted by transaction policy");
                     return Ok(None);
                 }
                 return Err(format!("No CSW for tag {} before timeout", expected_tag));
@@ -634,13 +635,13 @@ impl UsbTransport {
             {
                 Ok(_) => {}
                 Err(rusb::Error::Timeout) if policy == CswPolicy::AllowMissing => {
-                    eprintln!("  << No CSW after short timeout; accepted by transaction policy");
+                    log_verbose!("  << No CSW after short timeout; accepted by transaction policy");
                     return Ok(None);
                 }
                 Err(rusb::Error::Pipe | rusb::Error::NoDevice)
                     if policy == CswPolicy::AllowMissing =>
                 {
-                    eprintln!(
+                    log_verbose!(
                         "  << Device disconnected before CSW; accepted by transaction policy"
                     );
                     return Ok(None);
@@ -696,7 +697,7 @@ impl UpgTransport for UsbTransport {
         match self.write_txn_inner(payload, policy) {
             Ok(csw) => Ok(csw),
             Err(e) if e.contains("Bulk write failed at 0/31") || e.contains("Pipe") => {
-                eprintln!("  >> WRITE retry after reconnect: {}", e);
+                log_verbose!("  >> WRITE retry after reconnect: {}", e);
                 self.wait_reconnect(Duration::from_secs(10))?;
                 self.write_txn_inner(payload, policy)
             }

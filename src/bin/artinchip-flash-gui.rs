@@ -12,9 +12,12 @@ use artinchip_flash::build_info;
 use artinchip_flash::i18n::{command_label, tr, Language, Msg};
 use artinchip_flash::image::parser::{self, ImageSummary, MetaSummary};
 use artinchip_flash::official::{self, OfficialArgs, OfficialCommand};
+use artinchip_flash::services::{self, UartSpec};
 use artinchip_flash::standalone;
+use artinchip_flash::update::{self, UpdateChannel};
 use artinchip_flash::uart::{SerialPortInfo, UartDevice, UartMonitor, UartOptions};
 use artinchip_flash::usb::device::{AicDevice, BurnEvent, BurnOptions, DeviceInfo};
+use artinchip_flash::verbosity;
 use eframe::egui;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,12 +93,16 @@ struct GuiApp {
     official_args: OfficialArgs,
     settings_path: PathBuf,
     log_started_at: Instant,
+    update_rx: Option<Receiver<Result<update::UpdateStatus, String>>>,
+    update_status: String,
+    update_check_in_progress: bool,
 }
 
 impl GuiApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_cjk_font(&cc.egui_ctx);
         let config = AppConfig::load_default();
+        verbosity::set_verbose(config.verbose);
         let settings_path = config.app_dir.join("config.ini");
         let image_history = load_image_history(&config.app_dir);
         let transport = TransportKind::from_config(&config.transport);
@@ -128,11 +135,18 @@ impl GuiApp {
             monitor_input: String::new(),
             settings_path,
             log_started_at: Instant::now(),
+            update_rx: None,
+            update_status: String::new(),
+            update_check_in_progress: false,
         };
         if let Some(path) = app.config.image_path.clone() {
             app.load_image_summary(path, false);
         }
         app.start_device_scan(cc.egui_ctx.clone(), false);
+        // Auto update check on startup (24h throttle, non-blocking).
+        if app.config.auto_check_update && !update_recently_checked(app.config.last_update_check_unix) {
+            app.start_update_check(cc.egui_ctx.clone());
+        }
         app
     }
 
@@ -174,6 +188,68 @@ impl GuiApp {
             let _ = tx.send(result);
             ctx.request_repaint();
         });
+    }
+
+    fn start_update_check(&mut self, ctx: egui::Context) {
+        if self.update_check_in_progress {
+            return;
+        }
+        let channel = UpdateChannel::from_str(&self.config.update_channel);
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        self.update_check_in_progress = true;
+        self.update_status = self.t(Msg::CheckingUpdate).to_string();
+        thread::spawn(move || {
+            let result = update::check(channel);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    fn apply_update_result(&mut self, result: Result<update::UpdateStatus, String>) {
+        self.update_check_in_progress = false;
+        match result {
+            Ok(status) => {
+                self.config.last_update_check_unix = current_unix_secs();
+                let _ = self.config.save_to(&self.settings_path);
+                if status.update_available {
+                    self.update_status = format!(
+                        "{}: {} -> {}",
+                        self.t(Msg::UpdateAvailable),
+                        status.current_version,
+                        status.latest_tag
+                    );
+                    self.log(format!(
+                        "{}: {} ({}). {}: {}",
+                        self.t(Msg::UpdateAvailable),
+                        status.current_version,
+                        status.latest_tag,
+                        self.t(Msg::OpenReleasePage),
+                        status.html_url
+                    ));
+                    if !status.notes_preview.is_empty() {
+                        for line in status.notes_preview.lines().take(5) {
+                            self.log(format!("  {}", line));
+                        }
+                    }
+                } else {
+                    self.update_status = format!(
+                        "{} ({})",
+                        self.t(Msg::UpToDate),
+                        status.current_version
+                    );
+                    self.log(format!(
+                        "{}: {}",
+                        self.t(Msg::UpToDate),
+                        status.current_version
+                    ));
+                }
+            }
+            Err(e) => {
+                self.update_status = e.clone();
+                self.log(format!("{}: {}", self.t(Msg::CheckUpdate), e));
+            }
+        }
     }
 
     fn apply_serial_scan(&mut self, result: Result<Vec<SerialPortInfo>, String>) {
@@ -279,7 +355,7 @@ impl GuiApp {
     }
 
     fn load_image_summary(&mut self, path: PathBuf, update_history: bool) {
-        match parser::read_image_summary(&path) {
+        match services::load_image_summary(&path) {
             Ok(summary) => {
                 self.config.image_path = Some(path.clone());
                 self.official_args.image = Some(path.clone());
@@ -610,6 +686,7 @@ impl GuiApp {
 
     fn poll_worker(&mut self, ctx: &egui::Context) {
         self.poll_device_scan(ctx);
+        self.poll_update_check(ctx);
 
         let monitor_lines: Vec<String> = self
             .monitor
@@ -672,6 +749,20 @@ impl GuiApp {
             }
             if !serial_done {
                 self.serial_scan_rx = Some(rx);
+            }
+        }
+    }
+
+    fn poll_update_check(&mut self, ctx: &egui::Context) {
+        let mut done = false;
+        if let Some(rx) = self.update_rx.take() {
+            while let Ok(result) = rx.try_recv() {
+                self.apply_update_result(result);
+                done = true;
+                ctx.request_repaint();
+            }
+            if !done {
+                self.update_rx = Some(rx);
             }
         }
     }
@@ -1474,6 +1565,9 @@ impl GuiApp {
         ui.checkbox(&mut self.config.auto_burn, auto_burn);
         ui.checkbox(&mut self.config.adb_scan, adb_scan);
         ui.checkbox(&mut self.config.read_device_log, read_device_log);
+        verbosity::set_verbose(self.config.verbose);
+        ui.separator();
+        self.ui_update_settings(ui);
         ui.horizontal(|ui| {
             if ui.button(self.t(Msg::LoadAiBurnIni)).clicked() {
                 match AppConfig::load_from(&self.settings_path) {
@@ -1497,6 +1591,54 @@ impl GuiApp {
                 }
             }
         });
+    }
+
+    fn ui_update_settings(&mut self, ui: &mut egui::Ui) {
+        let channel_label = self.t(Msg::UpdateChannel);
+        let auto_label = self.t(Msg::AutoCheckUpdate);
+        let check_label = self.t(Msg::CheckUpdate);
+        let open_label = self.t(Msg::OpenReleasePage);
+        ui.horizontal(|ui| {
+            ui.label(channel_label);
+            let mut channel = self.config.update_channel.clone();
+            egui::ComboBox::from_id_salt("update_channel_select")
+                .selected_text(channel.clone())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut channel, "stable".to_string(), "stable");
+                    ui.selectable_value(&mut channel, "nightly".to_string(), "nightly");
+                });
+            self.config.update_channel = channel;
+            ui.checkbox(&mut self.config.auto_check_update, auto_label);
+        });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!self.update_check_in_progress, |ui| {
+                if ui.button(check_label).clicked() {
+                    self.start_update_check(ui.ctx().clone());
+                }
+            });
+            if ui.button(open_label).clicked() {
+                let channel = UpdateChannel::from_str(&self.config.update_channel);
+                let url = match channel {
+                    UpdateChannel::Nightly => update::nightly_url(),
+                    UpdateChannel::Stable => update::releases_url(),
+                };
+                if let Err(e) = update::open_url(&url) {
+                    self.log(e);
+                }
+            }
+            if !self.update_status.is_empty() {
+                ui.label(&self.update_status);
+            }
+        });
+        ui.label(format!(
+            "{} {}",
+            build_info::VERSION_WITH_BUILD,
+            if update::is_portable_install() {
+                "(portable)"
+            } else {
+                "(managed install)"
+            }
+        ));
     }
 
     fn ui_log(&mut self, ui: &mut egui::Ui) {
@@ -1629,22 +1771,15 @@ fn target_metas(summary: &ImageSummary) -> impl Iterator<Item = &MetaSummary> {
     summary
         .metas
         .iter()
-        .filter(|meta| meta.name.starts_with("image.target."))
+        .filter(|meta| services::is_target_component(&meta.name))
 }
 
 fn part_key(meta: &MetaSummary) -> String {
-    meta.name
-        .strip_prefix("image.target.")
-        .unwrap_or(&meta.name)
-        .to_string()
+    services::partition_key(&meta.name).to_string()
 }
 
 fn progress(sent: usize, total: usize) -> f32 {
-    if total == 0 {
-        0.0
-    } else {
-        (sent as f32 / total as f32).clamp(0.0, 1.0)
-    }
+    services::progress_ratio(sent, total)
 }
 
 trait DeviceLabel {
@@ -1662,11 +1797,25 @@ impl DeviceLabel for DeviceInfo {
 }
 
 fn open_uart_backend(port: &str, options: UartOptions) -> Result<UartDevice, String> {
-    if port.is_empty() || port.eq_ignore_ascii_case("auto") {
-        UartDevice::open_auto(options)
-    } else {
-        UartDevice::open_port(port, options)
-    }
+    // Shared implementation lives in `services`.
+    services::open_uart(&UartSpec::new(
+        port,
+        options.baudrate,
+        options.max_baudrate,
+        options.auto_enter,
+    ))
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn update_recently_checked(last_unix: u64) -> bool {
+    const DAY_SECS: u64 = 24 * 3600;
+    last_unix > 0 && current_unix_secs().saturating_sub(last_unix) < DAY_SECS
 }
 
 fn scan_summary(lang: Language, detected: usize, ready: usize, not_ready: usize) -> String {

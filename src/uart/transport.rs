@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use serialport::{DataBits, Parity, SerialPort, StopBits};
 
 use crate::device::UpgDevice;
+use crate::log_verbose;
 use crate::protocol::cbw_csw::*;
 use crate::protocol::commands::CMD_SET_UART_ARGS;
 use crate::transport::{CswPolicy, UpgTransport};
@@ -153,20 +154,20 @@ impl UartTransport {
     ///    `AIBURNID` boot keywords with ACK, so a board that is power-cycled
     ///    or reset during the wait can also enter upgrade mode.
     pub fn enter_upgrade(&mut self, timeout: Duration) -> Result<(), String> {
-        eprintln!(
+        log_verbose!(
             "No UART upgrade protocol yet; trying to enter upgrade mode on '{}' ...",
             self.port_name
         );
         self.flush_input(Duration::from_millis(150));
         let _ = self.write_raw(b"\r\n");
         self.capture_console(Duration::from_millis(250));
-        eprintln!("  >> sending application console command: aicupg gotobl");
+        log_verbose!("  >> sending application console command: aicupg gotobl");
         let _ = self.write_raw(b"aicupg gotobl\r");
         self.capture_console(Duration::from_millis(900));
-        eprintln!("  >> sending bootloader console command: aicupg uart 0");
+        log_verbose!("  >> sending bootloader console command: aicupg uart 0");
         let _ = self.write_raw(b"aicupg uart 0\r");
         self.capture_console(Duration::from_millis(900));
-        eprintln!(
+        log_verbose!(
             "  >> waiting up to {:?} for upgrade mode (reset the board now if it does not reboot)",
             timeout
         );
@@ -230,17 +231,17 @@ impl UartTransport {
         }
         let text = String::from_utf8_lossy(&keyword);
         if text.contains("AIBURN") {
-            eprintln!("  << device requested '{}'; replying ACK", text.trim());
+            log_verbose!("  << device requested '{}'; replying ACK", text.trim());
             let _ = self.write_raw(&[ACK]);
         } else if !text.trim().is_empty() {
-            eprintln!("  << {}", text.trim());
+            log_verbose!("  << {}", text.trim());
         }
     }
 
     fn flush_console_line(&mut self, line: &mut String) {
         let text = line.trim();
         if !text.is_empty() {
-            eprintln!("  << {}", text);
+            log_verbose!("  << {}", text);
         }
         line.clear();
     }
@@ -271,7 +272,7 @@ impl UartTransport {
 
     fn reconnect_inner(&mut self, timeout: Duration) -> Result<(), String> {
         self.flush_input(Duration::from_millis(100));
-        eprintln!(
+        log_verbose!(
             "Waiting for UART device to reconnect on '{}' ...",
             self.port_name
         );
@@ -284,7 +285,7 @@ impl UartTransport {
             }
             match self.read_byte(PORT_POLL_SLICE) {
                 Ok(ACK) => {
-                    eprintln!("UART device reconnected on '{}'.", self.port_name);
+                    log_verbose!("UART device reconnected on '{}'.", self.port_name);
                     return Ok(());
                 }
                 Ok(SIG_A) => {
@@ -337,7 +338,7 @@ impl UartTransport {
         self.configure_port_baudrate(baudrate)?;
         std::thread::sleep(Duration::from_millis(20));
         let _csw = self.read_csw_for(tag, CswPolicy::Required)?;
-        eprintln!("UART baudrate switched to {} bps", baudrate);
+        log_verbose!("UART baudrate switched to {} bps", baudrate);
         Ok(())
     }
 
@@ -481,7 +482,7 @@ impl UartTransport {
                 SOH | STX => {}
                 ACK | NAK | CAN | SIG_A => continue,
                 other => {
-                    eprintln!("  << UART: ignoring unexpected byte 0x{:02x}", other);
+                    log_verbose!("  << UART: ignoring unexpected byte 0x{:02x}", other);
                     continue;
                 }
             }
@@ -496,7 +497,7 @@ impl UartTransport {
             };
             let blk = header[0];
             if blk != 255 - header[1] {
-                eprintln!(
+                log_verbose!(
                     "  << UART: bad block complement (blk={}, inv={})",
                     blk, header[1]
                 );
@@ -523,7 +524,7 @@ impl UartTransport {
             let crc_expected = u16::from_be_bytes([body[data_len], body[data_len + 1]]);
             let crc_actual = crc16_ccitt(&body[..data_len]);
             if crc_actual != crc_expected {
-                eprintln!(
+                log_verbose!(
                     "  << UART: CRC16 mismatch (0x{:04x} != 0x{:04x}), requesting retransmit",
                     crc_actual, crc_expected
                 );
@@ -567,7 +568,7 @@ impl UartTransport {
         let bytes = match self.recv_buffer(13) {
             Ok(bytes) => bytes,
             Err(e) if policy == CswPolicy::AllowMissing => {
-                eprintln!(
+                log_verbose!(
                     "  << UART CSW missing accepted by transaction policy: {}",
                     e
                 );
@@ -611,7 +612,7 @@ impl UpgTransport for UartTransport {
         let data = match self.recv_buffer(read_len as usize) {
             Ok(data) => data,
             Err(e) if policy == CswPolicy::AllowMissing => {
-                eprintln!(
+                log_verbose!(
                     "  << UART data missing accepted by transaction policy: {}",
                     e
                 );
@@ -707,7 +708,7 @@ impl UpgDevice<UartTransport> {
     pub fn open_port(path: &str, options: UartOptions) -> Result<Self, String> {
         let transport = UartTransport::open(path, options.clone())?;
         let mut device = Self::new(transport);
-        eprintln!(
+        log_verbose!(
             "Connecting to ArtInChip UART device on '{}' at {} bps ...",
             path, options.baudrate
         );
@@ -731,7 +732,7 @@ impl UpgDevice<UartTransport> {
                 .enter_upgrade(options.enter_timeout)?;
         }
         device.get_hwinfo()?;
-        eprintln!("UART device connected on '{}'.", path);
+        log_verbose!("UART device connected on '{}'.", path);
         if let Some(speed) = options.max_baudrate {
             if speed > options.baudrate {
                 device.set_max_baudrate(speed)?;
@@ -764,7 +765,7 @@ impl UpgDevice<UartTransport> {
                 }
             };
             let mut device = Self::new(probe_port);
-            eprintln!("Probing '{}' ...", port.port_name);
+            log_verbose!("Probing '{}' ...", port.port_name);
             if device
                 .transport_mut()
                 .handshake_with_timeout(probe.connect_timeout)
@@ -775,7 +776,7 @@ impl UpgDevice<UartTransport> {
             if device.get_hwinfo().is_err() {
                 continue;
             }
-            eprintln!("ArtInChip UART device found on '{}'.", port.port_name);
+            log_verbose!("ArtInChip UART device found on '{}'.", port.port_name);
             if let Some(speed) = options.max_baudrate {
                 if speed > options.baudrate {
                     device.set_max_baudrate(speed)?;
@@ -790,7 +791,7 @@ impl UpgDevice<UartTransport> {
                 .filter(|port| port.port_type == "usb")
                 .collect::<Vec<_>>();
             if candidates.len() == 1 {
-                eprintln!(
+                log_verbose!(
                     "Trying to enter upgrade mode on the only USB serial port '{}' ...",
                     candidates[0].port_name
                 );
@@ -817,7 +818,7 @@ impl UpgDevice<UartTransport> {
     pub fn set_max_baudrate(&mut self, baudrate: u32) -> Result<(), String> {
         self.transport_mut().set_uart_baudrate(baudrate)?;
         if let Err(e) = self.get_hwinfo() {
-            eprintln!("Warning: device probe after baudrate switch failed: {}", e);
+            log_verbose!("Warning: device probe after baudrate switch failed: {}", e);
         }
         Ok(())
     }

@@ -71,7 +71,22 @@ artinchip-flash burn <img> --uart /dev/ttyUSB0                 # burn over UART
 artinchip-flash burn <img> --uart auto --speed 1500000         # probe ports, then switch baud
 artinchip-flash uart-monitor /dev/ttyUSB0                      # interactive UART console
 artinchip-flash uart-monitor /dev/ttyUSB0 --enter-upg          # trigger upgrade mode, then monitor
+artinchip-flash update [--channel stable|nightly] [--open]      # check GitHub Releases for updates
 ```
+
+Global flags: `--verbose` (transport-level CBW/CSW + UART framing logs,
+also `ARTINCHIP_FLASH_VERBOSE=1`), `--json` (machine-readable `scan`,
+`usb-list`, `serial-list`, `update`; `update` exits `10` when newer).
+
+## Updates
+
+Stable checks query GitHub Releases for semver `v*` tags (prereleases
+skipped); nightly reports the floating `nightly` page. Push a `v*` tag to
+publish a stable release — until then `update` tells you to create one.
+Portable checkouts download the matching archive from the release page;
+installer locations (`Program Files`, `/usr/bin`, `/Applications`) re-run
+the matching `msi/setup/deb/pkg` instead of replacing binaries. The GUI
+Settings tab has channel + auto-check (24h throttle) + check-now.
 
 ## UART firmware update
 
