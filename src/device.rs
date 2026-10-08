@@ -1,3 +1,7 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +22,10 @@ pub struct BurnOptions {
     pub selected_parts: Vec<String>,
     pub reset_after_burn: bool,
     pub burn_timeout: Duration,
+    /// Cooperative cancellation. When the flag is set, the burn loop aborts
+    /// at the next chunk boundary and returns a "cancelled" error, leaving
+    /// the device in upgrade mode so the user can retry.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for BurnOptions {
@@ -29,8 +37,27 @@ impl Default for BurnOptions {
                 .collect(),
             reset_after_burn: true,
             burn_timeout: Duration::from_secs(60),
+            cancel: None,
         }
     }
+}
+
+pub fn is_cancelled(options: &BurnOptions) -> bool {
+    options
+        .cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+fn check_cancelled(
+    options: &BurnOptions,
+    callback: &mut Option<&mut BurnCallback<'_>>,
+) -> Result<(), String> {
+    if is_cancelled(options) {
+        emit(callback, BurnEvent::Log("Burn cancelled by user".to_string()));
+        return Err("Burn cancelled by user".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +389,7 @@ impl<T: UpgTransport> UpgDevice<T> {
         options: &BurnOptions,
         mut callback: Option<&mut BurnCallback<'_>>,
     ) -> Result<(), String> {
+        check_cancelled(options, &mut callback)?;
         let classified = classify_components(metas, &options.selected_parts);
         for line in burn_plan_lines(&classified) {
             emit(&mut callback, BurnEvent::Log(line));
@@ -394,9 +422,11 @@ impl<T: UpgTransport> UpgDevice<T> {
                 .collect();
             let updater_last_index = updater_components.len().saturating_sub(1);
             for (index, component) in updater_components.iter().enumerate() {
+                check_cancelled(options, &mut callback)?;
                 let allow_final_response_no_csw = index == updater_last_index;
                 self.send_component(
                     img_data,
+                    options,
                     component,
                     allow_final_response_no_csw,
                     &mut overall_sent,
@@ -459,6 +489,7 @@ impl<T: UpgTransport> UpgDevice<T> {
         {
             self.send_component(
                 img_data,
+                options,
                 info,
                 false,
                 &mut overall_sent,
@@ -480,8 +511,10 @@ impl<T: UpgTransport> UpgDevice<T> {
             return Err("No selected target components to burn".to_string());
         }
         for component in selected {
+            check_cancelled(options, &mut callback)?;
             self.send_component(
                 img_data,
+                options,
                 component,
                 false,
                 &mut overall_sent,
@@ -509,6 +542,7 @@ impl<T: UpgTransport> UpgDevice<T> {
     fn send_component(
         &mut self,
         img_data: &[u8],
+        options: &BurnOptions,
         component: &FirmwareComponent<'_>,
         allow_final_no_csw: bool,
         overall_sent: &mut usize,
@@ -577,6 +611,7 @@ impl<T: UpgTransport> UpgDevice<T> {
             self.transport.transport_name()
         );
         while data_sent < size {
+            check_cancelled(options, callback)?;
             let chunk_end = (data_sent + chunk_max).min(size);
             let chunk_offset = offset + data_sent;
             let chunk_size = chunk_end - data_sent;
@@ -711,5 +746,167 @@ fn burn_plan_lines(components: &[FirmwareComponent<'_>]) -> Vec<String> {
 fn emit(callback: &mut Option<&mut BurnCallback<'_>>, event: BurnEvent) {
     if let Some(callback) = callback.as_deref_mut() {
         callback(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::cbw_csw::{AicCsw, AIC_UPG_SIGN_UPGR, AIC_USB_SIGN_USBS};
+    use crate::transport::UpgTransport;
+
+    struct MockTransport {
+        writes: usize,
+        reads: usize,
+        panic_on_use: bool,
+        max_chunk: usize,
+    }
+
+    impl MockTransport {
+        fn ok_csw() -> AicCsw {
+            let mut bytes = [0u8; 13];
+            bytes[0..4].copy_from_slice(&AIC_USB_SIGN_USBS.to_le_bytes());
+            AicCsw::from_bytes(&bytes).unwrap()
+        }
+
+        fn ok_resp_header() -> Vec<u8> {
+            let mut hdr = vec![0u8; 16];
+            hdr[0..4].copy_from_slice(&AIC_UPG_SIGN_UPGR.to_le_bytes());
+            hdr[4] = 1;
+            hdr[5] = 1;
+            hdr[6] = 0; // wildcard command: accepted for any request
+            hdr[7] = 0; // status OK
+            hdr
+        }
+    }
+
+    impl UpgTransport for MockTransport {
+        fn write_txn(
+            &mut self,
+            _payload: &[u8],
+            _policy: CswPolicy,
+        ) -> Result<Option<AicCsw>, String> {
+            if self.panic_on_use {
+                panic!("mock transport must not be touched after cancellation");
+            }
+            self.writes += 1;
+            Ok(Some(Self::ok_csw()))
+        }
+
+        fn read_txn(&mut self, read_len: u32, _policy: CswPolicy) -> Result<Vec<u8>, String> {
+            if self.panic_on_use {
+                panic!("mock transport must not be touched after cancellation");
+            }
+            self.reads += 1;
+            if read_len as usize == 16 {
+                return Ok(Self::ok_resp_header());
+            }
+            if read_len as usize == 4 {
+                // Block-size payload.
+                return Ok(512u32.to_le_bytes().to_vec());
+            }
+            Ok(vec![0u8; read_len as usize])
+        }
+
+        fn reconnect(&mut self, _timeout: Duration) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn transport_name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn max_write_chunk(&self, _block_size: u32) -> usize {
+            self.max_chunk
+        }
+    }
+
+    fn make_meta(name: &str, partition: &str, offset: u32, size: u32, crc: u32) -> FwcMeta {
+        let mut bytes = vec![0u8; 512];
+        bytes[0..8].copy_from_slice(b"FWC_META");
+        bytes[8..8 + name.len().min(64)].copy_from_slice(&name.as_bytes()[..name.len().min(64)]);
+        bytes[72..72 + partition.len().min(64)]
+            .copy_from_slice(&partition.as_bytes()[..partition.len().min(64)]);
+        bytes[136..140].copy_from_slice(&offset.to_le_bytes());
+        bytes[140..144].copy_from_slice(&size.to_le_bytes());
+        bytes[144..148].copy_from_slice(&crc.to_le_bytes());
+        FwcMeta::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn is_cancelled_reflects_flag() {
+        let plain = BurnOptions::default();
+        assert!(!is_cancelled(&plain));
+        let flag = Arc::new(AtomicBool::new(false));
+        let armed = BurnOptions {
+            cancel: Some(flag.clone()),
+            ..Default::default()
+        };
+        assert!(!is_cancelled(&armed));
+        flag.store(true, Ordering::SeqCst);
+        assert!(is_cancelled(&armed));
+    }
+
+    #[test]
+    fn pre_cancelled_burn_does_not_touch_transport() {
+        let img = vec![0xABu8; 4096];
+        let crc = crc32fast::hash(&img[0..2048]);
+        let metas = vec![make_meta("image.target.os", "os", 0, 2048, crc)];
+        let flag = Arc::new(AtomicBool::new(true));
+        let options = BurnOptions {
+            selected_parts: vec!["os".to_string()],
+            reset_after_burn: false,
+            burn_timeout: Duration::from_secs(5),
+            cancel: Some(flag),
+        };
+        let mut dev = UpgDevice::new(MockTransport {
+            writes: 0,
+            reads: 0,
+            panic_on_use: true,
+            max_chunk: 512,
+        });
+        let mut events = Vec::new();
+        let mut cb = |e: BurnEvent| events.push(format!("{:?}", e));
+        let err = dev
+            .burn_image_with_options(&img, &metas, &options, Some(&mut cb))
+            .expect_err("pre-cancelled burn must fail");
+        assert!(err.contains("cancelled"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn cancel_mid_chunk_aborts_burn() {
+        let img = vec![0xABu8; 4096];
+        let crc = crc32fast::hash(&img[0..2048]);
+        let metas = vec![make_meta("image.target.os", "os", 0, 2048, crc)];
+        let flag = Arc::new(AtomicBool::new(false));
+        let options = BurnOptions {
+            selected_parts: vec!["os".to_string()],
+            reset_after_burn: false,
+            burn_timeout: Duration::from_secs(5),
+            cancel: Some(flag.clone()),
+        };
+        let mut dev = UpgDevice::new(MockTransport {
+            writes: 0,
+            reads: 0,
+            panic_on_use: false,
+            max_chunk: 512,
+        });
+        let mut progress_events = 0usize;
+        let mut cb = |event: BurnEvent| {
+            if matches!(event, BurnEvent::ComponentProgress { .. }) {
+                progress_events += 1;
+                if progress_events >= 1 {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+        };
+        let err = dev
+            .burn_image_with_options(&img, &metas, &options, Some(&mut cb))
+            .expect_err("mid-burn cancel must fail");
+        assert!(err.contains("cancelled"), "unexpected error: {}", err);
+        assert!(
+            dev.transport_mut().writes >= 1,
+            "expected at least one chunk before cancel"
+        );
     }
 }

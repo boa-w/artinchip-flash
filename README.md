@@ -76,7 +76,12 @@ artinchip-flash update [--channel stable|nightly] [--open]      # check GitHub R
 
 Global flags: `--verbose` (transport-level CBW/CSW + UART framing logs,
 also `ARTINCHIP_FLASH_VERBOSE=1`), `--json` (machine-readable `scan`,
-`usb-list`, `serial-list`, `update`; `update` exits `10` when newer).
+`usb-list`, `serial-list`, `update`; `update` exits `10` when newer;
+`burn` progress events carry `elapsed_secs`/`rate_bps`).
+
+`burn` shows live rate + elapsed on both CLI and GUI, and `Ctrl+C` (CLI)
+or the Stop button (GUI) cancels at the next chunk boundary, leaving the
+device in upgrade mode so you can retry (CLI exit code `130`).
 
 ## Updates
 
@@ -176,7 +181,8 @@ Implemented GUI features:
   table, component extraction, and target partition selection.
 - AiBurn-style online burn flow with updater stage, reconnect wait,
   `FULL_DISK_UPGRADE`, `image.info`, selected target components, upgrade end,
-  progress events, CRC checks, and optional reset.
+  progress events, CRC checks, and optional reset; GUI shows live rate/elapsed
+  plus a Stop button, CLI supports `Ctrl+C` cancel.
 - Standalone environment check for USB access, config directory writability,
   selected image parsing, and driver readiness.
 - Built-in USB access setup: Windows WinUSB INF installation through `pnputil`,

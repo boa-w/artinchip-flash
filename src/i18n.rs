@@ -159,6 +159,9 @@ pub enum Msg {
     UpToDate,
     OpenReleasePage,
     CheckingUpdate,
+    Stop,
+    Rate,
+    Elapsed,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -333,6 +336,9 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::UpToDate => "已是最新版本",
         Msg::OpenReleasePage => "打开下载页",
         Msg::CheckingUpdate => "正在检查更新...",
+        Msg::Stop => "停止",
+        Msg::Rate => "速率",
+        Msg::Elapsed => "用时",
     }
 }
 
@@ -468,5 +474,8 @@ fn en(msg: Msg) -> &'static str {
         Msg::UpToDate => "Up to date",
         Msg::OpenReleasePage => "Open release page",
         Msg::CheckingUpdate => "Checking for updates...",
+        Msg::Stop => "Stop",
+        Msg::Rate => "Rate",
+        Msg::Elapsed => "Elapsed",
     }
 }

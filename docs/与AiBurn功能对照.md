@@ -23,6 +23,7 @@
 | 驱动安装 | `install-usb-access` / Driver 按钮 | Windows `pnputil` WinUSB、Linux udev（见差异 10） |
 | `AiBurn.ini` 兼容 | `load_from` | `image_path/auto_burn/show_statistic/is_verbose/retry_cnt/db_inited` 全读入并回存 |
 | 检查更新 | `update` / 设置页 | stable（`v*`）/nightly 双通道（见《更新机制》） |
+| 烧录速率/用时显示、停止（中止烧写） | CLI `Ctrl+C` + 速率/用时行 / GUI 停止按钮 + 状态行 | chunk 边界检查取消标志（`BurnOptions.cancel`），CLI 取消退出码 130，`--json` 带 `elapsed_secs`/`rate_bps` |
 
 协议层（`aicupg_cmd_*`）已覆盖烧录/查询/内存/分区/日志/串口参数/JTAG 相关命令字；
 文件类操作（`write_file/read_file/delete_file/storage_erase`）复用
@@ -34,7 +35,7 @@
 
 | # | 官方功能 | 现状 | 计划 |
 |---|---|---|---|
-| 1 | 烧录**速率/用时**显示、**停止**（中止烧写） | 仅进度条/百分比 | P1：在 `BurnEvent` 上叠加计时与速率（纯前端计算，无需协议改动）；烧录以 chunk 为单位检查取消标志，GUI 加停止按钮 |
+| 1 | 烧录**速率/用时**显示、**停止**（中止烧写） | 已实现（见上表） | 后续仅做文案/样式微调 |
 | 2 | **全片擦除**开关（烧录页） | 仅 `upgcmd flasherase` 透传 | P1：接到烧录前流程（存储擦除命令已具备） |
 | 3 | **强制升级**选项（与重启互斥） | 无（默认烧后重启） | P1：加 `force_upgrade` 烧录选项（对应 `UPG_MODE_BURN_IMG_FORCE`），需设备端开强制升级开关（Luban/Luban-Lite 配置见官方手册 §2.1.4）；无硬件验证前明确标注为实验性 |
 | 4 | **制作启动卡**（SD 枚举/GPT-MBR/格式化/MMC 镜像写卡，需管理员） | 未实现 | P2：跨平台裸盘写入工作量大（Windows `\\.\PhysicalDriveN` + GPT），先出设计文档；CLI 先做 `sd-list` 只读枚举 |

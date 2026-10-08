@@ -1,7 +1,11 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -83,6 +87,11 @@ struct GuiApp {
     component_progress: f32,
     active_component: String,
     busy: bool,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    burn_started_at: Option<Instant>,
+    overall_sent: usize,
+    overall_total: usize,
+    burn_rate_bps: f64,
     auto_started_for_device: bool,
     rx: Option<Receiver<WorkerEvent>>,
     scan_rx: Option<Receiver<DeviceScanResult>>,
@@ -126,6 +135,11 @@ impl GuiApp {
             component_progress: 0.0,
             active_component: String::new(),
             busy: false,
+            cancel_flag: None,
+            burn_started_at: None,
+            overall_sent: 0,
+            overall_total: 0,
+            burn_rate_bps: 0.0,
             auto_started_for_device: false,
             rx: None,
             scan_rx: None,
@@ -510,6 +524,12 @@ impl GuiApp {
         self.burn_progress = 0.0;
         self.component_progress = 0.0;
         self.active_component.clear();
+        self.overall_sent = 0;
+        self.overall_total = 0;
+        self.burn_rate_bps = 0.0;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_flag = Some(cancel.clone());
+        self.burn_started_at = Some(Instant::now());
         self.log(format!(
             "{} {} ...",
             self.t(Msg::BurnImageFile),
@@ -552,6 +572,7 @@ impl GuiApp {
                     selected_parts,
                     reset_after_burn,
                     burn_timeout: timeout,
+                    cancel: Some(cancel),
                 };
                 let mut callback = |event| {
                     let _ = tx.send(WorkerEvent::Burn(event));
@@ -574,6 +595,16 @@ impl GuiApp {
             }
             let _ = tx.send(WorkerEvent::Done);
         });
+    }
+
+    fn stop_burn(&mut self) {
+        if let Some(flag) = &self.cancel_flag {
+            flag.store(true, Ordering::SeqCst);
+            self.log(match self.lang() {
+                Language::ZhCn => "已请求停止烧录，等待当前数据块完成后中止…",
+                Language::En => "Stop requested; aborting after the current chunk…",
+            });
+        }
     }
 
     fn start_read_device_info(&mut self) {
@@ -715,6 +746,7 @@ impl GuiApp {
                     }
                     WorkerEvent::Done => {
                         self.busy = false;
+                        self.cancel_flag = None;
                         done = true;
                     }
                 }
@@ -794,15 +826,45 @@ impl GuiApp {
             }
             BurnEvent::OverallProgress { sent, total } => {
                 self.burn_progress = progress(sent, total);
+                self.overall_sent = sent;
+                self.overall_total = total;
+                self.refresh_burn_rate();
             }
             BurnEvent::ComponentFinished { name } => {
                 self.log(format!("{}: {}", self.t(Msg::BurnComponentSuccess), name))
             }
             BurnEvent::Finished => {
                 self.burn_progress = 1.0;
+                self.refresh_burn_rate();
                 self.log(self.t(Msg::BurnOnlineSuccess));
             }
         }
+    }
+
+    fn refresh_burn_rate(&mut self) {
+        if let Some(started) = self.burn_started_at {
+            let elapsed = started.elapsed().as_secs_f64();
+            if elapsed > 0.0 && self.overall_sent > 0 {
+                self.burn_rate_bps = self.overall_sent as f64 / elapsed;
+            }
+        }
+    }
+
+    fn burn_status_line(&self) -> String {
+        let elapsed = self
+            .burn_started_at
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        format!(
+            "{}: {}  {}: {}  {}: {}/{}",
+            self.t(Msg::Elapsed),
+            format_elapsed(elapsed),
+            self.t(Msg::Rate),
+            format_rate(self.burn_rate_bps),
+            self.t(Msg::Overall),
+            self.overall_sent,
+            self.overall_total
+        )
     }
 
     fn log(&mut self, line: impl Into<String>) {
@@ -964,20 +1026,31 @@ impl GuiApp {
         ui.separator();
         ui.add(egui::ProgressBar::new(self.burn_progress).text(self.t(Msg::Overall)));
         ui.add(egui::ProgressBar::new(self.component_progress).text(self.active_component.clone()));
+        ui.label(self.burn_status_line());
         let auto_burn = self.t(Msg::AutoBurn);
         let adb_scan = self.t(Msg::AdbScan);
         let read_device_log = self.t(Msg::ReadDeviceLog);
         let burn = self.t(Msg::TabBurn);
+        let stop = self.t(Msg::Stop);
+        let mut stop_requested = false;
         ui.horizontal(|ui| {
             ui.add_enabled_ui(!self.busy, |ui| {
                 if ui.button(burn).clicked() {
                     self.start_burn();
                 }
             });
+            ui.add_enabled_ui(self.busy && self.cancel_flag.is_some(), |ui| {
+                if ui.button(stop).clicked() {
+                    stop_requested = true;
+                }
+            });
             ui.checkbox(&mut self.config.auto_burn, auto_burn);
             ui.checkbox(&mut self.config.adb_scan, adb_scan);
             ui.checkbox(&mut self.config.read_device_log, read_device_log);
         });
+        if stop_requested {
+            self.stop_burn();
+        }
     }
 
     fn ui_transport(&mut self, ui: &mut egui::Ui) {
@@ -1703,6 +1776,11 @@ impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(app_window_title(self.lang())));
         self.poll_worker(ctx);
+        // Keep the rate/elapsed label ticking while a burn is in flight,
+        // even between chunk progress events.
+        if self.busy {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.tab {
@@ -1804,6 +1882,26 @@ fn part_key(meta: &MetaSummary) -> String {
 
 fn progress(sent: usize, total: usize) -> f32 {
     services::progress_ratio(sent, total)
+}
+
+fn format_rate(bps: f64) -> String {
+    if bps <= 0.0 {
+        return "--".to_string();
+    }
+    const MIB: f64 = 1024.0 * 1024.0;
+    const KIB: f64 = 1024.0;
+    if bps >= MIB {
+        format!("{:.2} MiB/s", bps / MIB)
+    } else if bps >= KIB {
+        format!("{:.1} KiB/s", bps / KIB)
+    } else {
+        format!("{:.0} B/s", bps)
+    }
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
 trait DeviceLabel {

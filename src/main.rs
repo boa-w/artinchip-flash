@@ -1,5 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Instant;
 
 use artinchip_flash::build_info;
 use artinchip_flash::device::{BurnEvent, BurnOptions, UpgDevice};
@@ -410,24 +415,48 @@ fn cmd_burn(
         img_data.len()
     );
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let flag = cancel.clone();
+        // Ignore double-install errors (tests / nested calls).
+        let _ = ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        });
+    }
     let options = BurnOptions {
         reset_after_burn: !no_reset,
+        cancel: Some(cancel),
         ..Default::default()
     };
 
+    eprintln!("Press Ctrl+C to cancel the burn (aborts at the next chunk).");
+    let started = Instant::now();
     let result = if let Some(port) = uart {
         open_uart_shared(&port, baud, speed, auto_enter)
-            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json))
+            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json, started))
     } else {
         usb::device::AicDevice::open_first()
-            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json))
+            .and_then(|dev| burn_with_device(dev, &img_data, &metas, &options, json, started))
     };
 
+    let elapsed = started.elapsed();
     if let Err(e) = result {
-        eprintln!("Burn failed: {}", e);
+        if e.contains("cancelled") {
+            eprintln!(
+                "Burn cancelled after {:.1}s (device stays in upgrade mode; retry when ready).",
+                elapsed.as_secs_f64()
+            );
+            std::process::exit(130);
+        }
+        eprintln!("Burn failed after {:.1}s: {}", elapsed.as_secs_f64(), e);
         std::process::exit(1);
     }
 
+    eprintln!(
+        "Burn completed successfully in {:.1}s (avg {}).",
+        elapsed.as_secs_f64(),
+        format_rate(img_data.len() as f64 / elapsed.as_secs_f64().max(0.001))
+    );
     println!("Burn completed successfully!");
 }
 
@@ -437,6 +466,7 @@ fn burn_with_device<T: UpgTransport>(
     metas: &[FwcMeta],
     options: &BurnOptions,
     json: bool,
+    started: Instant,
 ) -> Result<(), String> {
     println!("Transport: {}", dev.transport_name());
     match dev.device_info_lines() {
@@ -450,8 +480,9 @@ fn burn_with_device<T: UpgTransport>(
     // Library emits structured events; CLI renders them (previously the library
     // printed directly, which GUI could not reuse).
     let mut callback = |event: BurnEvent| {
+        let elapsed = started.elapsed();
         if json {
-            println!("{}", burn_event_json(&event));
+            println!("{}", burn_event_json_timed(&event, elapsed));
         } else {
             match event {
                 BurnEvent::Log(line) | BurnEvent::Stage(line) => eprintln!("{}", line),
@@ -460,49 +491,83 @@ fn burn_with_device<T: UpgTransport>(
                 }
                 BurnEvent::ComponentProgress { name, sent, total } => {
                     eprintln!(
-                        "  {}: {}/{} ({:.1}%)",
+                        "  {}: {}/{} ({:.1}%) {} {}",
                         name,
                         sent,
                         total,
-                        services::progress_ratio(sent, total) * 100.0
+                        services::progress_ratio(sent, total) * 100.0,
+                        format_rate(sent as f64 / elapsed.as_secs_f64().max(0.001)),
+                        format_elapsed(elapsed),
                     )
                 }
                 BurnEvent::OverallProgress { sent, total } => {
                     eprintln!(
-                        "  Overall: {}/{} ({:.1}%)",
+                        "  Overall: {}/{} ({:.1}%) {} {}",
                         sent,
                         total,
-                        services::progress_ratio(sent, total) * 100.0
+                        services::progress_ratio(sent, total) * 100.0,
+                        format_rate(sent as f64 / elapsed.as_secs_f64().max(0.001)),
+                        format_elapsed(elapsed),
                     )
                 }
                 BurnEvent::ComponentFinished { name } => {
                     eprintln!("Component done: {}", name)
                 }
-                BurnEvent::Finished => eprintln!("Burn finished"),
+                BurnEvent::Finished => eprintln!("Burn finished {}", format_elapsed(elapsed)),
             }
         }
     };
     dev.burn_image_with_options(img_data, metas, options, Some(&mut callback))
 }
 
+fn format_rate(bps: f64) -> String {
+    if !bps.is_finite() || bps <= 0.0 {
+        return "--".to_string();
+    }
+    const MIB: f64 = 1024.0 * 1024.0;
+    const KIB: f64 = 1024.0;
+    if bps >= MIB {
+        format!("{:.2} MiB/s", bps / MIB)
+    } else if bps >= KIB {
+        format!("{:.1} KiB/s", bps / KIB)
+    } else {
+        format!("{:.0} B/s", bps)
+    }
+}
+
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    format!("[{:02}:{:02}]", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+}
+
+#[allow(dead_code)]
 fn burn_event_json(event: &BurnEvent) -> serde_json::Value {
+    burn_event_json_timed(event, std::time::Duration::ZERO)
+}
+
+fn burn_event_json_timed(event: &BurnEvent, elapsed: std::time::Duration) -> serde_json::Value {
+    let elapsed_secs = elapsed.as_secs_f64();
     match event {
-        BurnEvent::Log(line) => serde_json::json!({ "type": "log", "line": line }),
-        BurnEvent::Stage(line) => serde_json::json!({ "type": "stage", "line": line }),
+        BurnEvent::Log(line) => serde_json::json!({ "type": "log", "line": line, "elapsed_secs": elapsed_secs }),
+        BurnEvent::Stage(line) => serde_json::json!({ "type": "stage", "line": line, "elapsed_secs": elapsed_secs }),
         BurnEvent::ComponentStarted { name, partition, size } => {
-            serde_json::json!({ "type": "component_started", "name": name, "partition": partition, "size": size })
+            serde_json::json!({ "type": "component_started", "name": name, "partition": partition, "size": size, "elapsed_secs": elapsed_secs })
         }
         BurnEvent::ComponentProgress { name, sent, total } => {
-            serde_json::json!({ "type": "component_progress", "name": name, "sent": sent, "total": total })
+            serde_json::json!({ "type": "component_progress", "name": name, "sent": sent, "total": total, "elapsed_secs": elapsed_secs, "rate_bps": rate_bps(*sent, elapsed) })
         }
         BurnEvent::OverallProgress { sent, total } => {
-            serde_json::json!({ "type": "overall_progress", "sent": sent, "total": total })
+            serde_json::json!({ "type": "overall_progress", "sent": sent, "total": total, "elapsed_secs": elapsed_secs, "rate_bps": rate_bps(*sent, elapsed) })
         }
         BurnEvent::ComponentFinished { name } => {
-            serde_json::json!({ "type": "component_finished", "name": name })
+            serde_json::json!({ "type": "component_finished", "name": name, "elapsed_secs": elapsed_secs })
         }
-        BurnEvent::Finished => serde_json::json!({ "type": "finished" }),
+        BurnEvent::Finished => serde_json::json!({ "type": "finished", "elapsed_secs": elapsed_secs }),
     }
+}
+
+fn rate_bps(sent: usize, elapsed: std::time::Duration) -> f64 {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    sent as f64 / secs
 }
 
 fn cmd_env_check(image: Option<PathBuf>) {
