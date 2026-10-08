@@ -28,10 +28,28 @@ pub enum OfficialCommand {
     JtagUnlockData,
     JtagUnlock,
     Raw,
+    /// `bdefuse list` — list eFuse information (hidden in `upgcmd --help`,
+    /// syntax from upgcmd V2.1.0 binary help strings, verified as a valid
+    /// top-level command by probe: unknown commands print "not found").
+    BdefuseList,
+    /// `bdefuse select <id>` — select the eFuse.
+    BdefuseSelect,
+    /// `bdefuse read <start> <length> <file>` — read eFuse data to file.
+    BdefuseRead,
+    /// `bdefuse dump <start> <length>` — hex-dump eFuse data to console.
+    BdefuseDump,
+    /// `bdefuse write <start> <length> <file>` — write eFuse from file (OTP!).
+    BdefuseWrite,
+    /// `bdefuse writehex <start> <hexdata>` — write eFuse from hex data (OTP!).
+    BdefuseWriteHex,
+    /// `auzwritefuse <authorization file>` — write eFuse from an
+    /// authorization file. Verified as valid top-level command by probe
+    /// (`auzwitefuse` spelling is rejected); file format is undocumented.
+    AuzWriteFuse,
 }
 
 impl OfficialCommand {
-    pub const ALL: [OfficialCommand; 25] = [
+    pub const ALL: [OfficialCommand; 32] = [
         OfficialCommand::ListDevices,
         OfficialCommand::ImageInfo,
         OfficialCommand::ExtractImage,
@@ -57,6 +75,13 @@ impl OfficialCommand {
         OfficialCommand::JtagUnlockData,
         OfficialCommand::JtagUnlock,
         OfficialCommand::Raw,
+        OfficialCommand::BdefuseList,
+        OfficialCommand::BdefuseSelect,
+        OfficialCommand::BdefuseRead,
+        OfficialCommand::BdefuseDump,
+        OfficialCommand::BdefuseWrite,
+        OfficialCommand::BdefuseWriteHex,
+        OfficialCommand::AuzWriteFuse,
     ];
 
     pub fn label(self) -> &'static str {
@@ -86,6 +111,13 @@ impl OfficialCommand {
             OfficialCommand::JtagUnlockData => "JTAG unlock data",
             OfficialCommand::JtagUnlock => "JTAG unlock",
             OfficialCommand::Raw => "Raw upgcmd",
+            OfficialCommand::BdefuseList => "eFuse list (bdefuse)",
+            OfficialCommand::BdefuseSelect => "eFuse select (bdefuse)",
+            OfficialCommand::BdefuseRead => "eFuse read (bdefuse)",
+            OfficialCommand::BdefuseDump => "eFuse dump (bdefuse)",
+            OfficialCommand::BdefuseWrite => "eFuse write (bdefuse)",
+            OfficialCommand::BdefuseWriteHex => "eFuse write hex (bdefuse)",
+            OfficialCommand::AuzWriteFuse => "eFuse authorized write",
         }
     }
 }
@@ -120,6 +152,9 @@ pub struct OfficialArgs {
     /// `upgcmd --baudrate <baud>` — max UART transmission baudrate.
     /// Mirrors official `upgcmd -b`; empty means default.
     pub baudrate: String,
+    /// `bdefuse select` target id ("Select the eFuse"). Only used by
+    /// [`OfficialCommand::BdefuseSelect`]; empty means unset.
+    pub efuse_id: String,
 }
 
 impl Default for OfficialArgs {
@@ -147,6 +182,7 @@ impl Default for OfficialArgs {
             device: String::new(),
             uart_port: String::new(),
             baudrate: String::new(),
+            efuse_id: String::new(),
         }
     }
 }
@@ -291,6 +327,49 @@ pub fn build_args(args: &OfficialArgs) -> Result<Vec<String>, String> {
             out.extend(split_raw_args(&args.raw_args));
         }
         OfficialCommand::Raw => out.extend(split_raw_args(&args.raw_args)),
+        // eFuse family: argument shapes mirror the upgcmd V2.1.0 binary help
+        // strings verbatim (`bdefuse ...` / `auzwritefuse <authorization file>`).
+        // Start/length reuse the generic address/length fields; the GUI labels
+        // them accordingly. eFuse writes are OTP-irreversible (0→1 only).
+        OfficialCommand::BdefuseList => {
+            out.push("bdefuse".to_string());
+            out.push("list".to_string());
+        }
+        OfficialCommand::BdefuseSelect => {
+            out.push("bdefuse".to_string());
+            out.push("select".to_string());
+            out.push(required_text(&args.efuse_id, "eFuse id")?);
+        }
+        OfficialCommand::BdefuseRead => {
+            out.push("bdefuse".to_string());
+            out.push("read".to_string());
+            out.push(required_text(&args.address, "start")?);
+            out.push(required_text(&args.length, "length")?);
+            out.push(required_path(args.output.as_deref(), "output file")?);
+        }
+        OfficialCommand::BdefuseDump => {
+            out.push("bdefuse".to_string());
+            out.push("dump".to_string());
+            out.push(required_text(&args.address, "start")?);
+            out.push(required_text(&args.length, "length")?);
+        }
+        OfficialCommand::BdefuseWrite => {
+            out.push("bdefuse".to_string());
+            out.push("write".to_string());
+            out.push(required_text(&args.address, "start")?);
+            out.push(required_text(&args.length, "length")?);
+            out.push(required_path(args.input.as_deref(), "input file")?);
+        }
+        OfficialCommand::BdefuseWriteHex => {
+            out.push("bdefuse".to_string());
+            out.push("writehex".to_string());
+            out.push(required_text(&args.address, "start")?);
+            out.push(required_text(&args.value, "hex data")?);
+        }
+        OfficialCommand::AuzWriteFuse => {
+            out.push("auzwritefuse".to_string());
+            out.push(required_path(args.input.as_deref(), "authorization file")?);
+        }
     }
 
     Ok(out)
@@ -576,5 +655,80 @@ mod tests {
     #[test]
     fn pre_burn_erase_rejects_empty_media() {
         assert!(pre_burn_erase_args("", None, "", "", "").is_err());
+    }
+
+    fn bdefuse_args(command: OfficialCommand) -> OfficialArgs {
+        let mut args = OfficialArgs::default();
+        args.command = command;
+        // Keep transport selectors empty so only the command words show.
+        args.address = "0xC0".to_string();
+        args.length = "64".to_string();
+        args.value = "00FF".to_string();
+        args.efuse_id = "0".to_string();
+        args.input = Some(PathBuf::from("in.bin"));
+        args.output = Some(PathBuf::from("out.bin"));
+        args
+    }
+
+    #[test]
+    fn bdefuse_commands_mirror_binary_help_shapes() {
+        // Shapes mirror the upgcmd V2.1.0 binary help strings verbatim.
+        let cases = [
+            (
+                OfficialCommand::BdefuseList,
+                vec!["--progress", "bdefuse", "list"],
+            ),
+            (
+                OfficialCommand::BdefuseSelect,
+                vec!["--progress", "bdefuse", "select", "0"],
+            ),
+            (
+                OfficialCommand::BdefuseRead,
+                vec!["--progress", "bdefuse", "read", "0xC0", "64", "out.bin"],
+            ),
+            (
+                OfficialCommand::BdefuseDump,
+                vec!["--progress", "bdefuse", "dump", "0xC0", "64"],
+            ),
+            (
+                OfficialCommand::BdefuseWrite,
+                vec!["--progress", "bdefuse", "write", "0xC0", "64", "in.bin"],
+            ),
+            (
+                OfficialCommand::BdefuseWriteHex,
+                vec!["--progress", "bdefuse", "writehex", "0xC0", "00FF"],
+            ),
+            (
+                OfficialCommand::AuzWriteFuse,
+                vec!["--progress", "auzwritefuse", "in.bin"],
+            ),
+        ];
+        for (command, expected) in cases {
+            let out = build_args(&bdefuse_args(command)).unwrap();
+            assert_eq!(
+                out,
+                expected.into_iter().map(str::to_string).collect::<Vec<_>>(),
+                "{:?}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn bdefuse_requires_its_arguments() {
+        let mut empty = OfficialArgs::default();
+        // Address/length/value carry non-empty defaults; clear them so the
+        // "missing argument" paths are actually exercised.
+        empty.address = String::new();
+        empty.length = String::new();
+        empty.value = String::new();
+        empty.command = OfficialCommand::BdefuseSelect;
+        assert!(build_args(&empty).is_err());
+        empty.command = OfficialCommand::BdefuseRead;
+        assert!(build_args(&empty).is_err());
+        empty.command = OfficialCommand::BdefuseWriteHex;
+        assert!(build_args(&empty).is_err());
+        empty.command = OfficialCommand::AuzWriteFuse;
+        assert!(build_args(&empty).is_err());
     }
 }

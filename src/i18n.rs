@@ -166,6 +166,7 @@ pub enum Msg {
     ForceUpgrade,
     EraseAllNote,
     ForceUpgradeNote,
+    EfuseId,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -203,6 +204,13 @@ pub fn command_label(lang: Language, command: OfficialCommand) -> &'static str {
             OfficialCommand::JtagUnlockData => "读取 JTAG 解锁数据",
             OfficialCommand::JtagUnlock => "JTAG 解锁",
             OfficialCommand::Raw => "原始 upgcmd",
+            OfficialCommand::BdefuseList => "eFuse 信息",
+            OfficialCommand::BdefuseSelect => "选择 eFuse",
+            OfficialCommand::BdefuseRead => "eFuse 读取",
+            OfficialCommand::BdefuseDump => "eFuse 转储",
+            OfficialCommand::BdefuseWrite => "eFuse 烧录",
+            OfficialCommand::BdefuseWriteHex => "eFuse 十六进制烧录",
+            OfficialCommand::AuzWriteFuse => "eFuse 授权烧录",
         },
         Language::En => command.label(),
     }
@@ -347,6 +355,7 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::ForceUpgrade => "强制升级",
         Msg::EraseAllNote => "烧录前经 upgcmd 整片擦除，需配置 upgcmd 路径；介质留空则取镜像介质 ID",
         Msg::ForceUpgradeNote => "实验性：强制升级模式且烧后不复位，需设备端开启强制升级开关",
+        Msg::EfuseId => "eFuse 编号",
     }
 }
 
@@ -493,6 +502,7 @@ fn en(msg: Msg) -> &'static str {
         Msg::ForceUpgradeNote => {
             "Experimental: force-upgrade mode without post-burn reset; the device must enable force upgrade"
         },
+        Msg::EfuseId => "eFuse ID",
     }
 }
 
@@ -508,11 +518,31 @@ mod tests {
                 Msg::ForceUpgrade,
                 Msg::EraseAllNote,
                 Msg::ForceUpgradeNote,
+                Msg::EfuseId,
                 Msg::Stop,
                 Msg::Rate,
                 Msg::Elapsed,
             ] {
                 assert!(!tr(lang, msg).is_empty(), "{:?} for {:?}", msg, lang);
+            }
+        }
+    }
+
+    #[test]
+    fn every_official_command_has_a_label_in_both_languages() {
+        for command in OfficialCommand::ALL {
+            assert!(
+                !command.label().is_empty(),
+                "missing English label for {:?}",
+                command
+            );
+            for lang in Language::ALL {
+                assert!(
+                    !command_label(lang, command).is_empty(),
+                    "missing {:?} label for {:?}",
+                    lang,
+                    command
+                );
             }
         }
     }

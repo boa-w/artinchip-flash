@@ -24,6 +24,7 @@
 | `AiBurn.ini` 兼容 | `load_from` | `image_path/auto_burn/show_statistic/is_verbose/retry_cnt/db_inited` 全读入并回存 |
 | 检查更新 | `update` / 设置页 | stable（`v*`）/nightly 双通道（见《更新机制》） |
 | 烧录速率/用时显示、停止（中止烧写） | CLI `Ctrl+C` + 速率/用时行 / GUI 停止按钮 + 状态行 | chunk 边界检查取消标志（`BurnOptions.cancel`），CLI 取消退出码 130，`--json` 带 `elapsed_secs`/`rate_bps` |
+| eFuse 读/烧录（含授权烧录透传） | 工具页 7 个 `bdefuse`/`auzwritefuse` 命令 | 参数形状逐字取自官方 `upgcmd` 二进制帮助（主 `--help` 未列出）；Bank 表与 U-Boot `efuse` 语法见《eFuse 分析与实现》 |
 | **全片擦除**开关（烧录页） | CLI `--erase-all/--erase-media/--upgcmd-path` / GUI 全片擦除复选框 + 介质框 | 烧录前经官方 `upgcmd flasherase` 擦除（原生擦除命令未经逆向确认，不猜协议）；介质缺省取镜像 `media_dev_id`，透传 `--dev/--uart/--baudrate` |
 | **强制升级**选项（与重启互斥） | CLI `--force-upgrade` / GUI 强制升级复选框（`BurnOptions.force_upgrade`） | `SET_UPG_CFG` 改发 `BURN_IMG_FORCE`（0x04）且跳过烧后复位；实验性，需设备端开强制升级开关（官方手册 §2.1.4），无硬件验证 |
 
@@ -41,13 +42,14 @@
 | 2 | **全片擦除**开关（烧录页） | 已实现（见上表；经 `upgcmd` 前置擦除） | 原生擦除命令确认前保持透传方案，不猜协议 |
 | 3 | **强制升级**选项（与重启互斥） | 已实现（见上表；实验性，无硬件验证） | 待真机验证后去实验性标注 |
 | 4 | **制作启动卡**（SD 枚举/GPT-MBR/格式化/MMC 镜像写卡，需管理员） | 未实现 | P2：跨平台裸盘写入工作量大（Windows `\\.\PhysicalDriveN` + GPT），先出设计文档；CLI 先做 `sd-list` 只读枚举 |
-| 5 | **数据擦写**页（进擦写模式、擦除 Boot、读/擦/写数据、eFuse 读/烧录） | 未实现 | P2：读/擦/写数据可映射到现有内存与分区命令；eFuse 官方无 `upgcmd` 直接命令，需抓包/逆向确认地域寻址协议后实现，不猜协议 |
-| 6 | **Agent 服务**（TCP 9100、串口监听推送、技能包 `burn/readlog/getstatus/sendcmd`） | 未实现 | P2：独立服务模块 + JSON 线协议文档；技能包放 `skill/` 目录 |
-| 7 | **烧写统计**（按天成功/失败/成功率） | 仅保留 `show_statistic/db_inited` 键 | P2：`burn_stats.json` 按天计数 + 设置页表格（无额外依赖，`serde_json` 已有） |
-| 8 | 按次 `.log` 文件落盘 | 仅内存日志窗 | P2：`logs/artinchip-flash-<时间>.log`，CLI 复用同一函数 |
-| 9 | 环境检测：冲突服务（VMware USB 等）**停止并禁用** | 仅配置/USB/镜像检查 | P2：Windows 服务枚举（`sc query`）+ 提权停用；Linux/macOS 给等效提示 |
-| 10 | WHQL 签名驱动（`.cat`） | 自生成未签名 INF | 如实告知：签名需厂商证书，个人开源项目无法提供；企业用户可自行签名后替换 `driver/` 目录 |
-| 11 | 随包 updater 固件（`bin/fw_d1xx.bin`） | 使用镜像内嵌 updater 组件 | 等效：官方内置 updater 只是兜底，镜像内 updater 优先；暂不打包 |
+| 5 | **数据擦写**页（进擦写模式、擦除 Boot、读/擦/写数据） | 未实现 | P2：读/擦/写数据可映射到现有内存与分区命令，进擦写模式与 bulk 会话（`bdopen/bdcfg/bdread/bdwrite/bderase/bdclose`）线格式未知，需按《eFuse 分析与实现》§6 抓包确认，不猜协议 |
+| 6 | eFuse 读/烧录（含 Bank 表与 U-Boot `efuse` 语法） | 已实现（见上表；`bdefuse`/`auzwritefuse` 透传 + Bank 表文档） | 原生 `bd_efuse_read/write` 会话待与 #5 一并抓包确认 |
+| 7 | **Agent 服务**（TCP 9100、串口监听推送、技能包 `burn/readlog/getstatus/sendcmd`） | 未实现 | P2：独立服务模块 + JSON 线协议文档；技能包放 `skill/` 目录 |
+| 8 | **烧写统计**（按天成功/失败/成功率） | 仅保留 `show_statistic/db_inited` 键 | P2：`burn_stats.json` 按天计数 + 设置页表格（无额外依赖，`serde_json` 已有） |
+| 9 | 按次 `.log` 文件落盘 | 仅内存日志窗 | P2：`logs/artinchip-flash-<时间>.log`，CLI 复用同一函数 |
+| 10 | 环境检测：冲突服务（VMware USB 等）**停止并禁用** | 仅配置/USB/镜像检查 | P2：Windows 服务枚举（`sc query`）+ 提权停用；Linux/macOS 给等效提示 |
+| 11 | WHQL 签名驱动（`.cat`） | 自生成未签名 INF | 如实告知：签名需厂商证书，个人开源项目无法提供；企业用户可自行签名后替换 `driver/` 目录 |
+| 12 | 随包 updater 固件（`bin/fw_d1xx.bin`） | 使用镜像内嵌 updater 组件 | 等效：官方内置 updater 只是兜底，镜像内 updater 优先；暂不打包 |
 
 ## 兼容性说明
 

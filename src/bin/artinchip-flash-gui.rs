@@ -1569,13 +1569,16 @@ impl GuiApp {
             _ => {}
         }
         match self.official_args.command {
-            OfficialCommand::WriteMemory => {
+            OfficialCommand::WriteMemory
+            | OfficialCommand::BdefuseWrite
+            | OfficialCommand::AuzWriteFuse => {
                 let label = self.t(Msg::Input);
                 let browse = self.t(Msg::Browse);
                 path_picker(ui, label, browse, &mut self.official_args.input, false);
             }
             OfficialCommand::DumpPartition
             | OfficialCommand::ReadMemory
+            | OfficialCommand::BdefuseRead
             | OfficialCommand::JtagUnlockData => {
                 let label = self.t(Msg::Output);
                 let browse = self.t(Msg::Browse);
@@ -1628,6 +1631,10 @@ impl GuiApp {
                 | OfficialCommand::HexDump
                 | OfficialCommand::Fill
                 | OfficialCommand::Clear
+                | OfficialCommand::BdefuseRead
+                | OfficialCommand::BdefuseDump
+                | OfficialCommand::BdefuseWrite
+                | OfficialCommand::BdefuseWriteHex
         ) {
             ui.horizontal(|ui| {
                 ui.label(self.t(Msg::Address));
@@ -1640,13 +1647,18 @@ impl GuiApp {
                         | OfficialCommand::Fill
                         | OfficialCommand::Clear
                         | OfficialCommand::WriteMemory
+                        | OfficialCommand::BdefuseRead
+                        | OfficialCommand::BdefuseDump
+                        | OfficialCommand::BdefuseWrite
                 ) {
                     ui.label(self.t(Msg::Length));
                     ui.text_edit_singleline(&mut self.official_args.length);
                 }
                 if matches!(
                     self.official_args.command,
-                    OfficialCommand::WriteLong | OfficialCommand::Fill
+                    OfficialCommand::WriteLong
+                        | OfficialCommand::Fill
+                        | OfficialCommand::BdefuseWriteHex
                 ) {
                     ui.label(self.t(Msg::Value));
                     ui.text_edit_singleline(&mut self.official_args.value);
@@ -1655,6 +1667,12 @@ impl GuiApp {
                     ui.label(self.t(Msg::Round));
                     ui.text_edit_singleline(&mut self.official_args.round);
                 }
+            });
+        }
+        if self.official_args.command == OfficialCommand::BdefuseSelect {
+            ui.horizontal(|ui| {
+                ui.label(self.t(Msg::EfuseId));
+                ui.text_edit_singleline(&mut self.official_args.efuse_id);
             });
         }
         if self.official_args.command == OfficialCommand::WriteMemory {
