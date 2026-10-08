@@ -46,10 +46,15 @@ pub enum OfficialCommand {
     /// authorization file. Verified as valid top-level command by probe
     /// (`auzwitefuse` spelling is rejected); file format is undocumented.
     AuzWriteFuse,
+    /// `bdreboot` — reboot the device (bulk-data session verb, zero args).
+    /// Verified as a valid top-level command by probe (unknown commands print
+    /// "not found", `bdreboot` proceeds to device-open). The AiBurn manual
+    /// exits erase mode by rebooting.
+    BdReboot,
 }
 
 impl OfficialCommand {
-    pub const ALL: [OfficialCommand; 32] = [
+    pub const ALL: [OfficialCommand; 33] = [
         OfficialCommand::ListDevices,
         OfficialCommand::ImageInfo,
         OfficialCommand::ExtractImage,
@@ -82,6 +87,7 @@ impl OfficialCommand {
         OfficialCommand::BdefuseWrite,
         OfficialCommand::BdefuseWriteHex,
         OfficialCommand::AuzWriteFuse,
+        OfficialCommand::BdReboot,
     ];
 
     pub fn label(self) -> &'static str {
@@ -118,6 +124,7 @@ impl OfficialCommand {
             OfficialCommand::BdefuseWrite => "eFuse write (bdefuse)",
             OfficialCommand::BdefuseWriteHex => "eFuse write hex (bdefuse)",
             OfficialCommand::AuzWriteFuse => "eFuse authorized write",
+            OfficialCommand::BdReboot => "Reboot device (bd)",
         }
     }
 }
@@ -369,6 +376,12 @@ pub fn build_args(args: &OfficialArgs) -> Result<Vec<String>, String> {
         OfficialCommand::AuzWriteFuse => {
             out.push("auzwritefuse".to_string());
             out.push(required_path(args.input.as_deref(), "authorization file")?);
+        }
+        // Bulk-data session verb, zero arguments (verified valid by probe:
+        // unknown commands print "not found", `bdreboot` proceeds to
+        // device-open). The manual exits erase mode by rebooting.
+        OfficialCommand::BdReboot => {
+            out.push("bdreboot".to_string());
         }
     }
 
@@ -730,5 +743,19 @@ mod tests {
         assert!(build_args(&empty).is_err());
         empty.command = OfficialCommand::AuzWriteFuse;
         assert!(build_args(&empty).is_err());
+    }
+
+    #[test]
+    fn bdreboot_takes_no_arguments() {
+        let mut args = OfficialArgs::default();
+        args.command = OfficialCommand::BdReboot;
+        let out = build_args(&args).unwrap();
+        assert_eq!(
+            out,
+            vec!["--progress", "bdreboot"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
     }
 }

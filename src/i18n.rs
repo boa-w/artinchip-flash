@@ -211,6 +211,7 @@ pub fn command_label(lang: Language, command: OfficialCommand) -> &'static str {
             OfficialCommand::BdefuseWrite => "eFuse 烧录",
             OfficialCommand::BdefuseWriteHex => "eFuse 十六进制烧录",
             OfficialCommand::AuzWriteFuse => "eFuse 授权烧录",
+            OfficialCommand::BdReboot => "设备重启（bd）",
         },
         Language::En => command.label(),
     }
