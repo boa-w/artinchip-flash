@@ -202,7 +202,7 @@ enum Commands {
         #[command(flatten)]
         transport: TransportArgs,
     },
-    /// Fill memory with a repeated 32-bit pattern (native, host-side loop)
+    /// Fill memory with a byte value (native, host-side loop)
     Fill {
         /// Memory address
         #[arg(value_name = "ADDR")]
@@ -210,7 +210,7 @@ enum Commands {
         /// Byte count
         #[arg(value_name = "LEN")]
         length: String,
-        /// 32-bit fill pattern
+        /// Byte fill value (0-255, like memset)
         #[arg(value_name = "VALUE")]
         value: String,
         #[command(flatten)]
@@ -1071,8 +1071,12 @@ fn cmd_fill(address: String, length: String, value: String, transport: Transport
     let addr = must_parse_u32("address", &address);
     let len = must_parse_u32("length", &length);
     let val = must_parse_u32("value", &value);
+    if val > 0xFF {
+        eprintln!("Fill value must be a byte (0-255), got {:#x}", val);
+        std::process::exit(1);
+    }
     with_native_device(&transport, |dev| {
-        dev.fill_memory(addr, len, val)?;
+        dev.fill_memory(addr, len, val as u8)?;
         println!("Filled {} bytes at {:#x} with {:#x}", len, addr, val);
         Ok(())
     });

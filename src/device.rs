@@ -427,18 +427,35 @@ impl<T: UpgTransport> UpgDevice<T> {
         Ok(())
     }
 
-    /// Fill `[addr, addr+len)` with the 4-byte LE `value` pattern.
+    /// Fill `[addr, addr+len)` with the byte `value` (official `fill`
+    /// semantics: "memory set the area with byte value").
     ///
     /// No dedicated UPG fill command exists in the public SDK, so this loops
     /// `WRITE` (0x02) in 1 MiB chunks (single USB transfer each; the device
     /// accumulates multi-packet writes).
-    pub fn fill_memory(&mut self, addr: u32, len: u32, value: u32) -> Result<(), String> {
+    pub fn fill_memory(&mut self, addr: u32, len: u32, value: u8) -> Result<(), String> {
         let end = addr
             .checked_add(len)
             .ok_or_else(|| format!("fill range overflow: {:#x} + {:#x}", addr, len))?;
         if len == 0 {
             return Err("fill length must be > 0".to_string());
         }
+        let mut offset = addr;
+        while offset < end {
+            let chunk = (end - offset).min(MEM_FILL_CHUNK) as usize;
+            self.write_memory(offset, &vec![value; chunk])?;
+            offset += chunk as u32;
+        }
+        Ok(())
+    }
+
+    /// Fill `[addr, addr+len)` with the 4-byte LE `value` pattern, chunked.
+    /// Word-pattern counterpart of [`UpgDevice::fill_memory`], used by the
+    /// memory test (official `fill` itself is byte-oriented).
+    fn fill_words(&mut self, addr: u32, len: u32, value: u32) -> Result<(), String> {
+        let end = addr
+            .checked_add(len)
+            .ok_or_else(|| format!("fill range overflow: {:#x} + {:#x}", addr, len))?;
         let pattern = value.to_le_bytes();
         let mut offset = addr;
         while offset < end {
@@ -476,7 +493,7 @@ impl<T: UpgTransport> UpgDevice<T> {
         let original = self.read_memory(addr, len)?;
         for _ in 0..rounds {
             for pattern in PATTERNS {
-                self.fill_memory(addr, len, pattern)?;
+                self.fill_words(addr, len, pattern)?;
                 let back = self.read_memory(addr, len)?;
                 verify_pattern(addr, pattern, &back)?;
             }
@@ -1429,17 +1446,17 @@ mod tests {
     }
 
     #[test]
-    fn fill_memory_writes_repeating_pattern() {
+    fn fill_memory_writes_repeating_byte() {
         let mut dev = UpgDevice::new(RamTransport {
             mem: std::collections::HashMap::new(),
             corrupt_writes: false,
             pending_cmd: 0,
             pending_read: None,
         });
-        dev.fill_memory(0x4000_0000, 10, 0x11223344).unwrap();
+        dev.fill_memory(0x4000_0000, 10, 0xAB).unwrap();
         assert_eq!(
             dev.read_memory(0x4000_0000, 10).unwrap(),
-            vec![0x44, 0x33, 0x22, 0x11, 0x44, 0x33, 0x22, 0x11, 0x44, 0x33]
+            vec![0xAB; 10]
         );
         assert!(dev.fill_memory(0x4000_0000, 0, 1).is_err());
         assert!(dev.fill_memory(u32::MAX, 16, 1).is_err());
