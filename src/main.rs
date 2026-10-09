@@ -19,7 +19,7 @@ use artinchip_flash::transport::UpgTransport;
 use artinchip_flash::update::{self, UpdateChannel};
 use artinchip_flash::usb;
 use artinchip_flash::verbosity;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -133,6 +133,129 @@ enum Commands {
     },
     /// Install platform USB access support (WinUSB INF or Linux udev rule)
     InstallUsbAccess,
+    /// Write a file to device memory (native UPG WRITE, no upgcmd needed)
+    Write {
+        /// Memory address (hex like 0x41000000, decimal, or 4k/1m suffix)
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// Input file whose bytes are written
+        #[arg(value_name = "FILE")]
+        input: PathBuf,
+        /// Skip this many input bytes before writing
+        #[arg(long, value_name = "N")]
+        skip: Option<String>,
+        /// Write at most this many bytes
+        #[arg(long, value_name = "N")]
+        length: Option<String>,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Read device memory to a file (native UPG READ)
+    Read {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// Byte count
+        #[arg(value_name = "LEN")]
+        length: String,
+        /// Output file
+        #[arg(value_name = "FILE")]
+        output: PathBuf,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Write one 32-bit little-endian word (native)
+    Writel {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// 32-bit value
+        #[arg(value_name = "VALUE")]
+        value: String,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Read one 32-bit little-endian word (native)
+    Readl {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Call the function at an address with no arguments (native UPG EXEC)
+    Exec {
+        /// Function address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Hexdump device memory (native UPG READ plus local formatting)
+    Hexdump {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// Byte count
+        #[arg(value_name = "LEN")]
+        length: String,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Fill memory with a repeated 32-bit pattern (native, host-side loop)
+    Fill {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// Byte count
+        #[arg(value_name = "LEN")]
+        length: String,
+        /// 32-bit fill pattern
+        #[arg(value_name = "VALUE")]
+        value: String,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Zero device memory (native, fill with 0)
+    Clear {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// Byte count
+        #[arg(value_name = "LEN")]
+        length: String,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Host-side RAM test: save, pattern-check, restore, re-verify (native).
+    /// Destructive by nature; avoid bootloader-reserved RAM.
+    Memtest {
+        /// Memory address
+        #[arg(value_name = "ADDR")]
+        address: String,
+        /// Byte count
+        #[arg(value_name = "SIZE")]
+        size: String,
+        /// Pattern rounds (default 1)
+        #[arg(long, default_value_t = 1)]
+        rounds: u32,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Run a bootloader shell command (native UPG RUN_SHELL_STR, max 127 B)
+    #[command(visible_alias = "sh")]
+    Shcmd {
+        /// Shell words, joined with spaces (e.g. shcmd md 0x40000000 4)
+        #[arg(value_name = "SHELL", required = true)]
+        shell: Vec<String>,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Print the device log buffer (native UPG GET_LOG_*)
+    Log {
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
     /// Show per-day burn statistics (success/failure/cancelled)
     Stats {
         /// Clear all recorded statistics instead of showing them
@@ -151,6 +274,40 @@ enum Commands {
         #[arg(long)]
         open: bool,
     },
+}
+
+/// Transport selectors shared by every native device command (USB default,
+/// UART opt-in with the same flags as `burn`/`info`).
+#[derive(Args, Clone, Debug)]
+struct TransportArgs {
+    /// Query over UART: port name, or "auto" to probe every serial port
+    #[arg(
+        long,
+        value_name = "PORT",
+        num_args = 0..=1,
+        default_missing_value = "auto"
+    )]
+    uart: Option<String>,
+    /// Initial UART baudrate used to reach the bootloader
+    #[arg(long, default_value_t = 115200)]
+    baud: u32,
+    /// Negotiate a higher UART baudrate before the command
+    #[arg(long, value_name = "BAUD")]
+    speed: Option<u32>,
+    /// Do not try to trigger UART upgrade mode when the protocol does not answer
+    #[arg(long)]
+    no_enter_upg: bool,
+}
+
+impl TransportArgs {
+    fn open(&self) -> Result<UpgDevice<Box<dyn UpgTransport>>, String> {
+        services::open_native_device(
+            self.uart.as_deref(),
+            self.baud,
+            self.speed,
+            !self.no_enter_upg,
+        )
+    }
 }
 
 fn main() {
@@ -201,6 +358,27 @@ fn main() {
         } => cmd_uart_monitor(port, baud, enter_upg),
         Commands::EnvCheck { image } => cmd_env_check(image),
         Commands::InstallUsbAccess => cmd_install_usb_access(),
+        Commands::Write { address, input, skip, length, transport } => {
+            cmd_write(address, input, skip, length, transport)
+        }
+        Commands::Read { address, length, output, transport } => {
+            cmd_read(address, length, output, transport)
+        }
+        Commands::Writel { address, value, transport } => cmd_writel(address, value, transport),
+        Commands::Readl { address, transport } => cmd_readl(address, transport),
+        Commands::Exec { address, transport } => cmd_exec(address, transport),
+        Commands::Hexdump { address, length, transport } => {
+            cmd_hexdump(address, length, transport)
+        }
+        Commands::Fill { address, length, value, transport } => {
+            cmd_fill(address, length, value, transport)
+        }
+        Commands::Clear { address, length, transport } => cmd_clear(address, length, transport),
+        Commands::Memtest { address, size, rounds, transport } => {
+            cmd_memtest(address, size, rounds, transport)
+        }
+        Commands::Shcmd { shell, transport } => cmd_shcmd(shell, transport),
+        Commands::Log { transport } => cmd_log(transport),
         Commands::Stats { clear } => cmd_stats(clear, cli.json),
         Commands::SdList => cmd_sd_list(cli.json),
         Commands::Update { channel, open } => cmd_update(&channel, open, cli.json),
@@ -754,6 +932,202 @@ fn burn_event_json_timed(event: &BurnEvent, elapsed: std::time::Duration) -> ser
 fn rate_bps(sent: usize, elapsed: std::time::Duration) -> f64 {
     let secs = elapsed.as_secs_f64().max(0.001);
     sent as f64 / secs
+}
+
+/// Run `f` against an opened native device; print the error and exit 1.
+fn with_native_device(
+    transport: &TransportArgs,
+    f: impl FnOnce(&mut UpgDevice<Box<dyn UpgTransport>>) -> Result<(), String>,
+) {
+    match transport.open().and_then(|mut dev| {
+        eprintln!("Transport: {}", dev.transport_name());
+        f(&mut dev)
+    }) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn must_parse_u32(label: &str, text: &str) -> u32 {
+    match services::parse_u32(text) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("Invalid {} ('{}'): {}", label, text, e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_write(
+    address: String,
+    input: PathBuf,
+    skip: Option<String>,
+    length: Option<String>,
+    transport: TransportArgs,
+) {
+    let addr = must_parse_u32("address", &address);
+    let skip_bytes = skip.as_deref().map(|s| must_parse_u32("skip", s)).unwrap_or(0) as usize;
+    let file = match fs::read(&input) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("Error reading '{}': {}", input.display(), e);
+            std::process::exit(1);
+        }
+    };
+    if skip_bytes > file.len() {
+        eprintln!(
+            "Skip {} exceeds input size {}",
+            skip_bytes,
+            file.len()
+        );
+        std::process::exit(1);
+    }
+    let mut data = &file[skip_bytes..];
+    if let Some(len_text) = length.as_deref() {
+        let max = must_parse_u32("length", len_text) as usize;
+        data = &data[..data.len().min(max)];
+    }
+    if data.is_empty() {
+        eprintln!("Nothing to write (input empty after skip/length)");
+        std::process::exit(1);
+    }
+    let len = data.len();
+    with_native_device(&transport, |dev| {
+        dev.write_memory(addr, data)?;
+        println!("Wrote {} bytes to {:#x}", len, addr);
+        Ok(())
+    });
+}
+
+fn cmd_read(address: String, length: String, output: PathBuf, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    let len = must_parse_u32("length", &length);
+    if len == 0 {
+        eprintln!("Length must be > 0");
+        std::process::exit(1);
+    }
+    with_native_device(&transport, |dev| {
+        let data = dev.read_memory(addr, len)?;
+        match fs::write(&output, &data) {
+            Ok(()) => println!(
+                "Read {} bytes from {:#x} to {}",
+                data.len(),
+                addr,
+                output.display()
+            ),
+            Err(e) => return Err(format!("Error writing '{}': {}", output.display(), e)),
+        }
+        Ok(())
+    });
+}
+
+fn cmd_writel(address: String, value: String, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    let val = must_parse_u32("value", &value);
+    with_native_device(&transport, |dev| {
+        dev.write_memory(addr, &val.to_le_bytes())?;
+        println!("Wrote {:#x} to {:#x}", val, addr);
+        Ok(())
+    });
+}
+
+fn cmd_readl(address: String, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    with_native_device(&transport, |dev| {
+        let data = dev.read_memory(addr, 4)?;
+        let val = u32::from_le_bytes(data[..4].try_into().unwrap());
+        println!("{:#x}: {:#x} ({})", addr, val, val);
+        Ok(())
+    });
+}
+
+fn cmd_exec(address: String, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    with_native_device(&transport, |dev| {
+        dev.exec_address(addr)?;
+        println!("Executed {:#x}", addr);
+        Ok(())
+    });
+}
+
+fn cmd_hexdump(address: String, length: String, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    let len = must_parse_u32("length", &length);
+    if len == 0 {
+        eprintln!("Length must be > 0");
+        std::process::exit(1);
+    }
+    with_native_device(&transport, |dev| {
+        let data = dev.read_memory(addr, len)?;
+        print!("{}", services::format_hexdump(addr, &data));
+        Ok(())
+    });
+}
+
+fn cmd_fill(address: String, length: String, value: String, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    let len = must_parse_u32("length", &length);
+    let val = must_parse_u32("value", &value);
+    with_native_device(&transport, |dev| {
+        dev.fill_memory(addr, len, val)?;
+        println!("Filled {} bytes at {:#x} with {:#x}", len, addr, val);
+        Ok(())
+    });
+}
+
+fn cmd_clear(address: String, length: String, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    let len = must_parse_u32("length", &length);
+    with_native_device(&transport, |dev| {
+        dev.fill_memory(addr, len, 0)?;
+        println!("Cleared {} bytes at {:#x}", len, addr);
+        Ok(())
+    });
+}
+
+fn cmd_memtest(address: String, size: String, rounds: u32, transport: TransportArgs) {
+    let addr = must_parse_u32("address", &address);
+    let len = must_parse_u32("size", &size);
+    eprintln!(
+        "Warning: memtest writes patterns in place at {:#x} ({} bytes, {} rounds); avoid bootloader-reserved RAM.",
+        addr, len, rounds
+    );
+    with_native_device(&transport, |dev| {
+        dev.memtest_memory(addr, len, rounds)?;
+        println!("memtest {:#x}+{:#x} rounds={}: PASS", addr, len, rounds);
+        Ok(())
+    });
+}
+
+fn cmd_shcmd(shell: Vec<String>, transport: TransportArgs) {
+    let line = shell.join(" ");
+    if line.trim().is_empty() {
+        eprintln!("Shell command must not be empty");
+        std::process::exit(1);
+    }
+    with_native_device(&transport, |dev| {
+        dev.run_shell(&line)?;
+        println!("OK");
+        Ok(())
+    });
+}
+
+fn cmd_log(transport: TransportArgs) {
+    with_native_device(&transport, |dev| {
+        let log = dev.get_device_log()?;
+        if log.is_empty() {
+            println!("(device log empty)");
+        } else {
+            print!("{}", log);
+            if !log.ends_with('\n') {
+                println!();
+            }
+        }
+        Ok(())
+    });
 }
 
 fn cmd_env_check(image: Option<PathBuf>) {

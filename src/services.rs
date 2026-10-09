@@ -6,8 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::device::UpgDevice;
 use crate::image::parser::{self, ImageSummary};
+use crate::transport::UpgTransport;
 use crate::uart::{UartDevice, UartOptions};
+use crate::usb::device::AicDevice;
 
 /// How the caller wants to reach the device over UART.
 #[derive(Clone, Debug)]
@@ -48,6 +51,93 @@ pub fn open_uart(spec: &UartSpec) -> Result<UartDevice, String> {
     } else {
         UartDevice::open_port(&spec.port, options)
     }
+}
+
+/// Open a device over either transport with one return type, so CLI commands
+/// that run identically on USB and UART don't duplicate every call site.
+/// `uart` is `None` for USB, `Some(port)` (or `"auto"`) for UART.
+pub fn open_native_device(
+    uart: Option<&str>,
+    baud: u32,
+    speed: Option<u32>,
+    auto_enter: bool,
+) -> Result<UpgDevice<Box<dyn UpgTransport>>, String> {
+    if let Some(port) = uart {
+        Ok(open_uart(&UartSpec::new(port, baud, speed, auto_enter))?.into_boxed())
+    } else {
+        Ok(AicDevice::open_first()?.into_boxed())
+    }
+}
+
+/// Parse a user-supplied integer: `0x`-prefixed hex, decimal, or decimal
+/// with a `k`/`m` suffix (`4k` = 4096, `1m` = 1048576). Underscores are
+/// rejected; surrounding whitespace is trimmed.
+pub fn parse_u32(text: &str) -> Result<u32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("expected an address/length value, got empty string".to_string());
+    }
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        if hex.is_empty() {
+            return Err(format!("invalid hex value '{}'", text));
+        }
+        return u32::from_str_radix(hex, 16)
+            .map_err(|_| format!("invalid hex value '{}'", text));
+    }
+    let (digits, mult) = if let Some(base) = trimmed
+        .strip_suffix('k')
+        .or_else(|| trimmed.strip_suffix('K'))
+    {
+        (base, 1024u32)
+    } else if let Some(base) = trimmed
+        .strip_suffix('m')
+        .or_else(|| trimmed.strip_suffix('M'))
+    {
+        (base, 1024 * 1024u32)
+    } else {
+        (trimmed, 1u32)
+    };
+    if digits.is_empty() {
+        return Err(format!("invalid numeric value '{}'", text));
+    }
+    let value = digits
+        .parse::<u32>()
+        .map_err(|_| format!("invalid numeric value '{}'", text))?;
+    value.checked_mul(mult).ok_or_else(|| {
+        format!("numeric value '{}' overflows u32 after suffix", text)
+    })
+}
+
+/// Classic 16-bytes-per-row hexdump (`addr: hex...  |ascii|`).
+pub fn format_hexdump(base_addr: u32, data: &[u8]) -> String {
+    let mut out = String::new();
+    for (row, chunk) in data.chunks(16).enumerate() {
+        let addr = base_addr.wrapping_add((row * 16) as u32);
+        out.push_str(&format!("{:08x}:", addr));
+        for i in 0..16 {
+            if i == 8 {
+                out.push(' ');
+            }
+            if let Some(byte) = chunk.get(i) {
+                out.push_str(&format!(" {:02x}", byte));
+            } else {
+                out.push_str("   ");
+            }
+        }
+        out.push_str("  |");
+        for byte in chunk {
+            out.push(if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            });
+        }
+        out.push_str("|\n");
+    }
+    out
 }
 
 /// Resolve the monitor port the same way CLI and GUI do.
@@ -203,6 +293,41 @@ mod tests {
         assert!(text.starts_with("cfg/logs/artinchip-flash-"), "{}", text);
         assert!(text.ends_with(".log"), "{}", text);
         assert!(!text.contains(':'), "{}", text);
+    }
+
+    #[test]
+    fn parse_u32_accepts_hex_dec_and_suffixes() {
+        assert_eq!(parse_u32("0x40000000").unwrap(), 0x40000000);
+        assert_eq!(parse_u32("0Xff").unwrap(), 0xff);
+        assert_eq!(parse_u32("4096").unwrap(), 4096);
+        assert_eq!(parse_u32("  64 ").unwrap(), 64);
+        assert_eq!(parse_u32("4k").unwrap(), 4096);
+        assert_eq!(parse_u32("4K").unwrap(), 4096);
+        assert_eq!(parse_u32("1m").unwrap(), 1024 * 1024);
+        assert!(parse_u32("").is_err());
+        assert!(parse_u32("0x").is_err());
+        assert!(parse_u32("zz").is_err());
+        assert!(parse_u32("12x").is_err());
+        assert!(parse_u32("0x1_000").is_err());
+        assert!(parse_u32("4294967296").is_err());
+        assert!(parse_u32("4096m").is_err()); // suffix overflow
+    }
+
+    #[test]
+    fn format_hexdump_shapes_rows() {
+        let data: Vec<u8> = (0u8..32).collect();
+        let text = format_hexdump(0x40000000, &data);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("40000000:"));
+        assert!(lines[0].contains("00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"));
+        assert!(lines[0].ends_with('|'));
+        assert!(lines[1].starts_with("40000010:"));
+        // Short tail row pads the hex area but keeps the ascii column tight.
+        let tail = format_hexdump(0x40000000, &[0x41, 0x00, 0xff]);
+        assert!(tail.contains(" 41 00 ff"));
+        assert!(tail.contains("|A..|"));
+        assert_eq!(format_hexdump(0x0, &[]), "");
     }
 
     #[test]

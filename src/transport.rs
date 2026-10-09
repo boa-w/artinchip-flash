@@ -47,3 +47,36 @@ pub trait UpgTransport {
         Err("this transport does not support UART baudrate negotiation".to_string())
     }
 }
+
+/// Forwarding impl so mixed transports can be unified as
+/// `UpgDevice<Box<dyn UpgTransport>>` (e.g. CLI commands that run over
+/// either USB or UART without duplicating every call site).
+impl<T: UpgTransport + ?Sized> UpgTransport for Box<T> {
+    fn write_txn(&mut self, payload: &[u8], policy: CswPolicy) -> Result<Option<AicCsw>, String> {
+        (**self).write_txn(payload, policy)
+    }
+
+    fn read_txn(&mut self, read_len: u32, policy: CswPolicy) -> Result<Vec<u8>, String> {
+        (**self).read_txn(read_len, policy)
+    }
+
+    fn reconnect(&mut self, timeout: Duration) -> Result<(), String> {
+        (**self).reconnect(timeout)
+    }
+
+    fn drain_rx(&mut self, timeout: Duration, max_bytes: usize) -> Result<(), String> {
+        (**self).drain_rx(timeout, max_bytes)
+    }
+
+    fn transport_name(&self) -> &'static str {
+        (**self).transport_name()
+    }
+
+    fn max_write_chunk(&self, block_size: u32) -> usize {
+        (**self).max_write_chunk(block_size)
+    }
+
+    fn set_uart_baudrate(&mut self, baudrate: u32) -> Result<(), String> {
+        (**self).set_uart_baudrate(baudrate)
+    }
+}

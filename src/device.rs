@@ -11,6 +11,8 @@ use crate::protocol::commands::*;
 use crate::transport::{CswPolicy, UpgTransport};
 
 const CHUNK_SIZE: u32 = 1024 * 1024;
+/// Host-side memory-op chunk (fill/memtest/restore): one USB transfer each.
+const MEM_FILL_CHUNK: u32 = 1024 * 1024;
 const UPDATER_PROBE_DELAY: Duration = Duration::from_millis(30);
 const OFFICIAL_UPG_CFG_RESERVED: [u8; 31] = [
     0xea, 0x00, 0x00, 0xbc, 0xf5, 0x44, 0x04, 0x50, 0xf5, 0x44, 0x04, 0x01, 0x00, 0x00, 0x00, 0x18,
@@ -138,6 +140,17 @@ impl<T: UpgTransport> UpgDevice<T> {
 
     pub(crate) fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
+    }
+
+    /// Box the transport so USB/UART devices share one type
+    /// (`UpgDevice<Box<dyn UpgTransport>>`) at CLI call sites.
+    pub fn into_boxed(self) -> UpgDevice<Box<dyn UpgTransport>>
+    where
+        T: 'static,
+    {
+        UpgDevice {
+            transport: Box::new(self.transport),
+        }
     }
 
     // ── High-level protocol helpers ────────────────────────────────────
@@ -411,6 +424,87 @@ impl<T: UpgTransport> UpgDevice<T> {
     pub fn exec_address(&mut self, addr: u32) -> Result<(), String> {
         let payload = exec_request(addr);
         let _resp = self.cmd_hdr_data_resp(CMD_EXEC, &payload, 0)?;
+        Ok(())
+    }
+
+    /// Fill `[addr, addr+len)` with the 4-byte LE `value` pattern.
+    ///
+    /// No dedicated UPG fill command exists in the public SDK, so this loops
+    /// `WRITE` (0x02) in 1 MiB chunks (single USB transfer each; the device
+    /// accumulates multi-packet writes).
+    pub fn fill_memory(&mut self, addr: u32, len: u32, value: u32) -> Result<(), String> {
+        let end = addr
+            .checked_add(len)
+            .ok_or_else(|| format!("fill range overflow: {:#x} + {:#x}", addr, len))?;
+        if len == 0 {
+            return Err("fill length must be > 0".to_string());
+        }
+        let pattern = value.to_le_bytes();
+        let mut offset = addr;
+        while offset < end {
+            let chunk = (end - offset).min(MEM_FILL_CHUNK) as usize;
+            let mut data = Vec::with_capacity(chunk);
+            while data.len() < chunk {
+                let take = (chunk - data.len()).min(4);
+                data.extend_from_slice(&pattern[..take]);
+            }
+            self.write_memory(offset, &data)?;
+            offset += chunk as u32;
+        }
+        Ok(())
+    }
+
+    /// Host-side memory test over `READ`/`WRITE`: saves the original content,
+    /// writes + verifies each pattern (`FFFFFFFF/00000000/AAAAAAAA/55555555`,
+    /// repeated `rounds` times), then restores and re-verifies the original.
+    ///
+    /// There is no `memtest` UPG command in the public SDK (`mtest` exists
+    /// only as a U-Boot shell word, not a protocol handler), so the pattern
+    /// loop runs on the host. Destructive by nature: avoid bootloader-reserved
+    /// RAM, and expect a reboot if the device crashes mid-test.
+    pub fn memtest_memory(&mut self, addr: u32, len: u32, rounds: u32) -> Result<(), String> {
+        let _end = addr
+            .checked_add(len)
+            .ok_or_else(|| format!("memtest range overflow: {:#x} + {:#x}", addr, len))?;
+        if len == 0 {
+            return Err("memtest length must be > 0".to_string());
+        }
+        if rounds == 0 {
+            return Err("memtest rounds must be >= 1".to_string());
+        }
+        const PATTERNS: [u32; 4] = [0xFFFF_FFFF, 0x0000_0000, 0xAAAA_AAAA, 0x5555_5555];
+        let original = self.read_memory(addr, len)?;
+        for _ in 0..rounds {
+            for pattern in PATTERNS {
+                self.fill_memory(addr, len, pattern)?;
+                let back = self.read_memory(addr, len)?;
+                verify_pattern(addr, pattern, &back)?;
+            }
+        }
+        self.write_chunks(addr, &original)?;
+        let restored = self.read_memory(addr, len)?;
+        if restored != original {
+            return Err(format!(
+                "memtest restore mismatch at {:#x} ({} bytes)",
+                addr, len
+            ));
+        }
+        Ok(())
+    }
+
+    /// Write `data` at `addr` in bounded chunks (shared by fill/restore).
+    fn write_chunks(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let chunk = (data.len() - offset).min(MEM_FILL_CHUNK as usize);
+            self.write_memory(
+                addr.checked_add(offset as u32).ok_or_else(|| {
+                    format!("write range overflow at {:#x} + {:#x}", addr, offset)
+                })?,
+                &data[offset..offset + chunk],
+            )?;
+            offset += chunk;
+        }
         Ok(())
     }
 
@@ -847,6 +941,33 @@ fn emit(callback: &mut Option<&mut BurnCallback<'_>>, event: BurnEvent) {
     }
 }
 
+/// Check `data` against the 4-byte LE `pattern` repeated from `base_addr`.
+/// Reports the first mismatching word address on failure.
+fn verify_pattern(base_addr: u32, pattern: u32, data: &[u8]) -> Result<(), String> {
+    let expected = pattern.to_le_bytes();
+    for (i, chunk) in data.chunks(4).enumerate() {
+        for (j, byte) in chunk.iter().enumerate() {
+            if *byte != expected[(i * 4 + j) % 4] {
+                return Err(format!(
+                    "memtest mismatch at {:#x}: expected {:#x}, got {:#x}",
+                    base_addr + (i * 4 + j) as u32,
+                    pattern,
+                    u32::from_le_bytes(padded_word(data, i * 4))
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// First up-to-4 bytes at `offset` as a u32 (zero-padded tail for reporting).
+fn padded_word(data: &[u8], offset: usize) -> [u8; 4] {
+    let mut word = [0u8; 4];
+    let take = (data.len().saturating_sub(offset)).min(4);
+    word[..take].copy_from_slice(&data[offset..offset + take]);
+    word
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1324,161 @@ mod tests {
         assert_eq!(
             dev.list_storage_media().unwrap(),
             vec![StorageMedia::new("", 0); 5]
+        );
+    }
+
+    /// Fake transport backed by real RAM: applies WRITE payloads to a map
+    /// and answers READs from it, with correct RESP `data_length`, so
+    /// fill/memtest logic is verified for real instead of against zeros.
+    struct RamTransport {
+        mem: std::collections::HashMap<u32, u8>,
+        /// When true, WRITE data is dropped (reads return prior content),
+        /// exercising the memtest mismatch path.
+        corrupt_writes: bool,
+        pending_cmd: u8,
+        pending_read: Option<(u32, u32)>,
+    }
+
+    impl RamTransport {
+        fn resp_header(cmd: u8, data_len: u32) -> Vec<u8> {
+            let mut hdr = vec![0u8; 16];
+            hdr[0..4].copy_from_slice(&AIC_UPG_SIGN_UPGR.to_le_bytes());
+            hdr[4] = 1;
+            hdr[5] = 1;
+            hdr[6] = cmd;
+            hdr[7] = 0;
+            hdr[8..12].copy_from_slice(&data_len.to_le_bytes());
+            hdr
+        }
+    }
+
+    impl UpgTransport for RamTransport {
+        fn write_txn(
+            &mut self,
+            payload: &[u8],
+            _policy: CswPolicy,
+        ) -> Result<Option<AicCsw>, String> {
+            if payload.len() == 16
+                && payload[0..4] == AIC_UPG_SIGN_UPGC.to_le_bytes()
+            {
+                // Command header (magic "UPGC"): record the command, the
+                // next write is its payload even when also 16 bytes long
+                // (e.g. an 8-byte WRITE of 8 data bytes).
+                self.pending_cmd = payload[6];
+                self.pending_read = None;
+                return Ok(Some(MockTransport::ok_csw()));
+            }
+            match self.pending_cmd {
+                CMD_WRITE => {
+                    let addr = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                    let len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+                    if !self.corrupt_writes {
+                        for (i, byte) in payload[8..8 + len].iter().enumerate() {
+                            self.mem.insert(addr + i as u32, *byte);
+                        }
+                    }
+                }
+                CMD_READ => {
+                    let addr = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                    let len = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+                    self.pending_read = Some((addr, len));
+                }
+                _ => {}
+            }
+            self.pending_cmd = 0;
+            Ok(Some(MockTransport::ok_csw()))
+        }
+
+        fn read_txn(&mut self, read_len: u32, _policy: CswPolicy) -> Result<Vec<u8>, String> {
+            if read_len as usize == 16 {
+                let data_len = self.pending_read.map(|(_, len)| len).unwrap_or(0);
+                return Ok(Self::resp_header(self.pending_cmd, data_len));
+            }
+            if let Some((addr, len)) = self.pending_read.take() {
+                assert_eq!(len, read_len, "device answers exactly the READ length");
+                return Ok((0..len).map(|i| self.mem.get(&(addr + i)).copied().unwrap_or(0)).collect());
+            }
+            Ok(vec![0u8; read_len as usize])
+        }
+
+        fn reconnect(&mut self, _timeout: Duration) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn transport_name(&self) -> &'static str {
+            "ram-fake"
+        }
+
+        fn max_write_chunk(&self, _block_size: u32) -> usize {
+            usize::MAX
+        }
+    }
+
+    #[test]
+    fn ram_fake_round_trips_write_then_read() {
+        let mut dev = UpgDevice::new(RamTransport {
+            mem: std::collections::HashMap::new(),
+            corrupt_writes: false,
+            pending_cmd: 0,
+            pending_read: None,
+        });
+        dev.write_memory(0x4000_0000, &[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(dev.read_memory(0x4000_0000, 5).unwrap(), vec![1, 2, 3, 4, 5]);
+        // Untouched regions read back as zeros.
+        assert_eq!(dev.read_memory(0x5000_0000, 4).unwrap(), vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fill_memory_writes_repeating_pattern() {
+        let mut dev = UpgDevice::new(RamTransport {
+            mem: std::collections::HashMap::new(),
+            corrupt_writes: false,
+            pending_cmd: 0,
+            pending_read: None,
+        });
+        dev.fill_memory(0x4000_0000, 10, 0x11223344).unwrap();
+        assert_eq!(
+            dev.read_memory(0x4000_0000, 10).unwrap(),
+            vec![0x44, 0x33, 0x22, 0x11, 0x44, 0x33, 0x22, 0x11, 0x44, 0x33]
+        );
+        assert!(dev.fill_memory(0x4000_0000, 0, 1).is_err());
+        assert!(dev.fill_memory(u32::MAX, 16, 1).is_err());
+    }
+
+    #[test]
+    fn memtest_passes_and_restores_original() {
+        let mut mem = std::collections::HashMap::new();
+        mem.insert(0x4000_0000, 0xAB);
+        mem.insert(0x4000_0001, 0xCD);
+        let mut dev = UpgDevice::new(RamTransport {
+            mem,
+            corrupt_writes: false,
+            pending_cmd: 0,
+            pending_read: None,
+        });
+        dev.memtest_memory(0x4000_0000, 8, 1).unwrap();
+        // Original content restored after the pattern loop.
+        assert_eq!(
+            dev.read_memory(0x4000_0000, 8).unwrap(),
+            vec![0xAB, 0xCD, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(dev.memtest_memory(0x4000_0000, 8, 0).is_err());
+        assert!(dev.memtest_memory(0x4000_0000, 0, 1).is_err());
+    }
+
+    #[test]
+    fn memtest_reports_first_mismatch_address() {
+        let mut dev = UpgDevice::new(RamTransport {
+            mem: std::collections::HashMap::new(),
+            corrupt_writes: true, // writes dropped: read-back never matches
+            pending_cmd: 0,
+            pending_read: None,
+        });
+        let err = dev.memtest_memory(0x4000_0000, 8, 1).unwrap_err();
+        assert!(
+            err.contains("0x40000000"),
+            "mismatch must name the address, got: {}",
+            err
         );
     }
 }

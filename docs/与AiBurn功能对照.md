@@ -14,7 +14,8 @@
 | 串口烧录（串口号+波特率+连接） | `--uart/--baud/--speed` / GUI 串口模式 | SOH/STX 组帧，`SET_UART_ARGS` 提速，自动进入升级模式 |
 | 串口监视收发 | `uart-monitor` / GUI 监视面板 | 应答 `AIBURNFORCE`/`AIBURNID`，一键 `aicupg gotobl` |
 | ADB 扫描进升级模式 | `adb_scan` 选项 | 调用兼容目录 `adb shell aicupg` |
-| `upgcmd` 25 命令 | 工具页 + `build_args` | 含 `--dev/--uart/--baudrate/--verbose/--log/--progress` 透传 |
+| `upgcmd` 25 命令 | 工具页 + `build_args` | 含 `--dev/--uart/--baudrate/--verbose/--log/--progress` 透传（Phase 4 切除前保留；内存/shell 系已有原生 CLI，见下） |
+| 原生内存/外壳命令（免 `upgcmd`） | CLI `write/read/writel/readl/exec/hexdump/fill/clear/memtest/shcmd/log` | 直调 UPG `WRITE/READ/EXEC/RUN_SHELL/GET_LOG_*`（格式取自 `basic_cmd.c`）；`fill/clear/memtest` 为 host 侧循环（无公开处理器），`memtest` 含保存→校验→恢复；USB/UART 通用；`continue/gotobl` 无公开依据，待抓包 |
 | 中英文切换 | `language` 设置 | 默认简体中文 |
 | 镜像历史 | `img_history.txt`（50 条） | 选择/清除逻辑同官方 |
 | 自动烧录 | `auto_burn` | 设备就绪即开烧 |
