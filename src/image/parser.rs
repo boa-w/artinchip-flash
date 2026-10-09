@@ -116,12 +116,28 @@ pub struct MetaSummary {
     pub index: usize,
     pub magic: String,
     pub name: String,
+    /// Partition name part of the META struct field (see
+    /// [`FwcMeta::partition_str`]); used for burn-target matching.
     pub partition: String,
+    /// Media type part of the META struct field (e.g. `"spi-nand"`, `"ram"`).
+    pub partition_media: String,
     pub offset: u32,
     pub size: u32,
     pub crc: u32,
     pub ram: u32,
     pub attr: String,
+}
+
+impl MetaSummary {
+    /// UI/CLI label for the partition column (`"spl@spi-nand"`, `"ram"`).
+    pub fn partition_display(&self) -> String {
+        match (self.partition.as_str(), self.partition_media.as_str()) {
+            ("", "") => String::new(),
+            ("", media) => media.to_string(),
+            (name, "") => name.to_string(),
+            (name, media) => format!("{}@{}", name, media),
+        }
+    }
 }
 
 impl ImageSummary {
@@ -153,6 +169,7 @@ impl ImageSummary {
                     magic: meta.magic_str().to_string(),
                     name: meta.name_str().to_string(),
                     partition: meta.partition_str().to_string(),
+                    partition_media: meta.partition_media().to_string(),
                     offset: meta.offset_val(),
                     size: meta.size_val(),
                     crc: meta.crc_val(),
@@ -368,7 +385,7 @@ pub fn format_image_info(data: &[u8]) -> Result<String, String> {
             "  [{:2}] {} (partition: {}, offset={:#x}, size={}, crc=0x{:08x}, ram={:#x}, attr='{}')",
             i,
             meta.name_str(),
-            meta.partition_str(),
+            meta.partition_display(),
             meta.offset_val(),
             meta.size_val(),
             meta.crc_val(),

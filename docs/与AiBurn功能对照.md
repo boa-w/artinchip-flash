@@ -9,7 +9,7 @@
 |---|---|---|
 | USB 在线烧录（updater→重连→FULL_DISK→image.info→目标组件→结束→复位） | CLI `burn` / GUI 烧录页 | 同 AiBurn 分阶段流程，CRC 校验，断线重连等待 |
 | 按分区烧录（spi/env/os/rodata/data/全选） | 分区勾选表 | `image.target.*` 可选，非目标组件自动处理 |
-| 镜像解析与摘要（SoC/板级/版本/介质） | `info <img>` / 镜像页 | 2048B 头 + 512B META，与 `upgcmd -i` 一致 |
+| 镜像解析与摘要（SoC/板级/版本/介质） | `info <img>` / 镜像页 | 2048B 头 + 512B META，与 `upgcmd -i` 一致；META 分区字段为结构体（名 34B + 起始 u32 + 大小 u16，单位 64KiB + 介质 24B，如 `spl@spi-nand`，updater 项为 `ram`），已按 D13x 镜像与 `partition.json` 交叉验证，不再按整段字符串显示 |
 | 组件解包 | 镜像页“解包组件” / `upgcmd --extract` 透传 | 按 META 名写文件 |
 | 串口烧录（串口号+波特率+连接） | `--uart/--baud/--speed` / GUI 串口模式 | SOH/STX 组帧，`SET_UART_ARGS` 提速，自动进入升级模式 |
 | 串口监视收发 | `uart-monitor` / GUI 监视面板 | 应答 `AIBURNFORCE`/`AIBURNID`，一键 `aicupg gotobl` |

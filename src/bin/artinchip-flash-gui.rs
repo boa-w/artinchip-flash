@@ -1445,7 +1445,7 @@ impl GuiApp {
                         }
                     });
                     ui.label(&meta.name);
-                    ui.label(&meta.partition);
+                    ui.label(meta.partition_display());
                     ui.label(meta.size.to_string());
                     ui.label(format!("{:#x}", meta.offset));
                     ui.label(format!("0x{:08x}", meta.crc));
