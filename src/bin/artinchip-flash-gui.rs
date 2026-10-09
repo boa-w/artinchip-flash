@@ -29,7 +29,6 @@ use eframe::egui;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tab {
     Burn,
-    Image,
     Tools,
     Settings,
 }
@@ -1044,14 +1043,12 @@ impl GuiApp {
 
     fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
         let burn = self.t(Msg::TabBurn);
-        let image = self.t(Msg::TabImage);
         let tools = self.t(Msg::TabTools);
         let settings = self.t(Msg::TabSettings);
         let scan = self.t(Msg::Scan);
         let device_info = self.t(Msg::DeviceInfo);
         ui.horizontal(|ui| {
             selectable_tab(ui, &mut self.tab, Tab::Burn, burn);
-            selectable_tab(ui, &mut self.tab, Tab::Image, image);
             selectable_tab(ui, &mut self.tab, Tab::Tools, tools);
             selectable_tab(ui, &mut self.tab, Tab::Settings, settings);
             ui.separator();
@@ -1104,6 +1101,26 @@ impl GuiApp {
             self.ui_monitor(ui);
         }
 
+        // Former Image tab, folded in: file/history/header/extract live here
+        // so the whole open → verify → burn flow stays on one page.
+        egui::CollapsingHeader::new(self.t(Msg::TabImage))
+            .id_salt("burn_image_section")
+            .default_open(true)
+            .show(ui, |ui| self.ui_image_section(ui));
+        egui::CollapsingHeader::new(self.t(Msg::Partitions))
+            .id_salt("burn_parts_section")
+            .default_open(true)
+            .show(ui, |ui| self.ui_partition_selector(ui));
+        egui::CollapsingHeader::new(self.t(Msg::TabBurn))
+            .id_salt("burn_control_section")
+            .default_open(true)
+            .show(ui, |ui| self.ui_burn_control(ui));
+    }
+
+    /// Image file row, history, component extraction and the full header
+    /// grid. The old one-line summary is intentionally dropped: every field
+    /// it showed (platform/product/version/media) is in the grid below.
+    fn ui_image_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(self.t(Msg::Image));
             let mut text = self
@@ -1146,21 +1163,58 @@ impl GuiApp {
                 });
         }
 
-        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(self.config.image_path.is_some(), |ui| {
+                if ui.button(self.t(Msg::ExtractComponents)).clicked() {
+                    if let Some(image) = self.config.image_path.clone() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            match parser::extract_components(&image, &dir) {
+                                Ok(files) => self.log(format!(
+                                    "{}: {} ({})",
+                                    self.t(Msg::ExtractedComponentsTo),
+                                    dir.display(),
+                                    files.len()
+                                )),
+                                Err(e) => self.log(format!("{}: {}", self.t(Msg::ExtractFailed), e)),
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
         if let Some(summary) = &self.image_summary {
-            ui.label(format!(
-                "{} {} v{} | {} | {} bytes",
-                summary.platform,
-                summary.product,
-                summary.version,
-                summary.media_type,
-                summary.total_size
-            ));
-            ui.label(format!("{}: {}", self.t(Msg::StorageId), summary.media_id));
+            egui::Grid::new("image_header")
+                .striped(true)
+                .show(ui, |ui| {
+                    row(ui, self.t(Msg::Magic), &summary.magic);
+                    row(ui, self.t(Msg::Platform), &summary.platform);
+                    row(ui, self.t(Msg::Product), &summary.product);
+                    row(ui, self.t(Msg::Version), &summary.version);
+                    row(ui, self.t(Msg::MediaType), &summary.media_type);
+                    row(ui, self.t(Msg::MediaId), &summary.media_id);
+                    row(
+                        ui,
+                        self.t(Msg::MediaDev),
+                        &format!("{:#x}", summary.media_dev_id),
+                    );
+                    row(
+                        ui,
+                        self.t(Msg::MetaOffset),
+                        &format!("{:#x}", summary.meta_offset),
+                    );
+                    row(ui, self.t(Msg::MetaSize), &summary.meta_size.to_string());
+                    row(
+                        ui,
+                        self.t(Msg::FileOffset),
+                        &format!("{:#x}", summary.file_offset),
+                    );
+                    row(ui, self.t(Msg::FileSize), &summary.file_size.to_string());
+                });
         }
-        ui.separator();
-        self.ui_partition_selector(ui);
-        ui.separator();
+    }
+
+    fn ui_burn_control(&mut self, ui: &mut egui::Ui) {
         ui.add(egui::ProgressBar::new(self.burn_progress).text(self.t(Msg::Overall)));
         ui.add(egui::ProgressBar::new(self.component_progress).text(self.active_component.clone()));
         ui.label(self.burn_status_line());
@@ -1452,67 +1506,6 @@ impl GuiApp {
                     ui.end_row();
                 }
             });
-    }
-
-    fn ui_image(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.t(Msg::TabImage));
-        ui.horizontal(|ui| {
-            if ui.button(self.t(Msg::OpenImage)).clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter(self.t(Msg::ArtInChipImageFilter), &["img"])
-                    .pick_file()
-                {
-                    self.load_image(path);
-                }
-            }
-            if ui.button(self.t(Msg::ExtractComponents)).clicked() {
-                if let Some(image) = self.config.image_path.clone() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        match parser::extract_components(&image, &dir) {
-                            Ok(files) => self.log(format!(
-                                "{}: {} ({})",
-                                self.t(Msg::ExtractedComponentsTo),
-                                dir.display(),
-                                files.len()
-                            )),
-                            Err(e) => self.log(format!("{}: {}", self.t(Msg::ExtractFailed), e)),
-                        }
-                    }
-                }
-            }
-        });
-
-        if let Some(summary) = &self.image_summary {
-            egui::Grid::new("image_header")
-                .striped(true)
-                .show(ui, |ui| {
-                    row(ui, self.t(Msg::Magic), &summary.magic);
-                    row(ui, self.t(Msg::Platform), &summary.platform);
-                    row(ui, self.t(Msg::Product), &summary.product);
-                    row(ui, self.t(Msg::Version), &summary.version);
-                    row(ui, self.t(Msg::MediaType), &summary.media_type);
-                    row(ui, self.t(Msg::MediaId), &summary.media_id);
-                    row(
-                        ui,
-                        self.t(Msg::MediaDev),
-                        &format!("{:#x}", summary.media_dev_id),
-                    );
-                    row(
-                        ui,
-                        self.t(Msg::MetaOffset),
-                        &format!("{:#x}", summary.meta_offset),
-                    );
-                    row(ui, self.t(Msg::MetaSize), &summary.meta_size.to_string());
-                    row(
-                        ui,
-                        self.t(Msg::FileOffset),
-                        &format!("{:#x}", summary.file_offset),
-                    );
-                    row(ui, self.t(Msg::FileSize), &summary.file_size.to_string());
-                });
-            ui.separator();
-            self.ui_partition_selector(ui);
-        }
     }
 
     fn ui_tools(&mut self, ui: &mut egui::Ui) {
@@ -2107,15 +2100,17 @@ impl eframe::App for GuiApp {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
+        egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| self.ui_log(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
-            match self.tab {
-                Tab::Burn => self.ui_burn(ui),
-                Tab::Image => self.ui_image(ui),
-                Tab::Tools => self.ui_tools(ui),
-                Tab::Settings => self.ui_settings(ui),
-            }
-            ui.separator();
-            self.ui_log(ui);
+            // The merged burn page is taller than the window: scroll the tab
+            // content while the log stays pinned at the bottom.
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.tab {
+                    Tab::Burn => self.ui_burn(ui),
+                    Tab::Tools => self.ui_tools(ui),
+                    Tab::Settings => self.ui_settings(ui),
+                });
         });
     }
 }
