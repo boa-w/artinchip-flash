@@ -95,6 +95,9 @@ struct GuiApp {
     burn_rate_bps: f64,
     burn_failed: bool,
     burn_error: Option<String>,
+    /// Elapsed time frozen at burn completion/cancel, so the status line
+    /// stops ticking. `None` before the first burn of this session.
+    burn_finished_elapsed: Option<Duration>,
     worker_is_burn: bool,
     auto_started_for_device: bool,
     rx: Option<Receiver<WorkerEvent>>,
@@ -146,6 +149,7 @@ impl GuiApp {
             burn_rate_bps: 0.0,
             burn_failed: false,
             burn_error: None,
+            burn_finished_elapsed: None,
             worker_is_burn: false,
             auto_started_for_device: false,
             rx: None,
@@ -568,6 +572,7 @@ impl GuiApp {
         self.burn_rate_bps = 0.0;
         self.burn_failed = false;
         self.burn_error = None;
+        self.burn_finished_elapsed = None;
         self.worker_is_burn = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(cancel.clone());
@@ -882,6 +887,12 @@ impl GuiApp {
                         self.worker_is_burn = false;
                         done = true;
                         if was_burn {
+                            // Freeze the elapsed counter at completion/cancel
+                            // so the status line stops ticking on later
+                            // repaints; then record the outcome.
+                            self.burn_finished_elapsed =
+                                self.burn_started_at.map(|s| s.elapsed());
+                            self.burn_started_at = None;
                             self.record_burn_stats();
                         }
                     }
@@ -987,9 +998,11 @@ impl GuiApp {
     }
 
     fn burn_status_line(&self) -> String {
+        // Live while burning; frozen at the completion value afterwards.
         let elapsed = self
             .burn_started_at
             .map(|started| started.elapsed())
+            .or(self.burn_finished_elapsed)
             .unwrap_or_default();
         format!(
             "{}: {}  {}: {}  {}: {}/{}",
@@ -2041,7 +2054,7 @@ impl GuiApp {
         }
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
-            .max_height(220.0)
+            .max_height(ui.available_height())
             .show(ui, |ui| {
                 for line in &self.log_lines {
                     ui.add(
@@ -2108,7 +2121,13 @@ impl eframe::App for GuiApp {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
-        egui::TopBottomPanel::bottom("log_panel").show(ctx, |ui| self.ui_log(ui));
+        // VSCode-terminal style: the user can drag the separator to resize
+        // the log area; the inner scroll view fills whatever height results.
+        egui::TopBottomPanel::bottom("log_panel")
+            .resizable(true)
+            .default_height(220.0)
+            .min_height(80.0)
+            .show(ctx, |ui| self.ui_log(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
             // The merged burn page is taller than the window: scroll the tab
             // content while the log stays pinned at the bottom.
