@@ -357,10 +357,9 @@ impl<T: UpgTransport> UpgDevice<T> {
     }
 
     pub fn run_shell(&mut self, cmd_str: &str) -> Result<(), String> {
-        let cmd_bytes = cmd_str.as_bytes();
-        let len = cmd_bytes.len() as u32;
-        let mut payload = len.to_le_bytes().to_vec();
-        payload.extend_from_slice(cmd_bytes);
+        // Device shell buffer is 128 B and the string must arrive in one
+        // packet (basic_cmd.c run_shell_str_cmd_write_input_data).
+        let payload = shell_request(cmd_str)?;
         let _resp = self.cmd_hdr_data_resp(CMD_RUN_SHELL_STR, &payload, 0)?;
         Ok(())
     }
@@ -375,6 +374,66 @@ impl<T: UpgTransport> UpgDevice<T> {
             .trim_end_matches('\0')
             .to_string();
         Ok(media)
+    }
+
+    /// Parsed `GET_STORAGE_MEDIA` list (68-byte `struct storage_media`
+    /// entries). The legacy [`UpgDevice::get_storage_media`] string form
+    /// stays for existing callers.
+    pub fn list_storage_media(&mut self) -> Result<Vec<StorageMedia>, String> {
+        // One entry is 68 B; ask for a small batch (device answers however
+        // many it detected, `medias[5]` at most).
+        let resp = self.cmd_hdr_resp(CMD_GET_STORAGE_MEDIA, 5 * STORAGE_MEDIA_SIZE)?;
+        Ok(StorageMedia::parse_list(&resp.payload))
+    }
+
+    /// `WRITE` (0x02): write `data` to device memory at `addr`.
+    pub fn write_memory(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
+        let payload = write_mem_request(addr, data);
+        let _resp = self.cmd_hdr_data_resp(CMD_WRITE, &payload, 0)?;
+        Ok(())
+    }
+
+    /// `READ` (0x03): read `len` bytes of device memory at `addr`.
+    pub fn read_memory(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, String> {
+        let payload = read_mem_request(addr, len);
+        let resp = self.cmd_hdr_data_resp(CMD_READ, &payload, len as usize)?;
+        if resp.payload.len() != len as usize {
+            return Err(format!(
+                "READ returned {} bytes, expected {}",
+                resp.payload.len(),
+                len
+            ));
+        }
+        Ok(resp.payload)
+    }
+
+    /// `EXEC` (0x04): call the function at `addr` (no arguments).
+    pub fn exec_address(&mut self, addr: u32) -> Result<(), String> {
+        let payload = exec_request(addr);
+        let _resp = self.cmd_hdr_data_resp(CMD_EXEC, &payload, 0)?;
+        Ok(())
+    }
+
+    /// `GET_STORAGE_GEOME` (0x1A): 24-byte geometry for `media`.
+    pub fn get_storage_geometry(
+        &mut self,
+        media: &StorageMedia,
+    ) -> Result<StorageGeometry, String> {
+        let resp =
+            self.cmd_hdr_data_resp(CMD_GET_STORAGE_GEOME, &media.to_bytes(), STORAGE_GEOMETRY_SIZE)?;
+        StorageGeometry::from_bytes(&resp.payload).ok_or_else(|| {
+            format!(
+                "Geometry response too short: {} bytes",
+                resp.payload.len()
+            )
+        })
+    }
+
+    /// `ERASE_STORAGE` (0x1B): synchronous erase described by `args`
+    /// (units follow the geometry command: bytes on Flash, sectors on MMC).
+    pub fn erase_storage(&mut self, args: &StorageEraseArgs) -> Result<(), String> {
+        let _resp = self.cmd_hdr_data_resp(CMD_ERASE_STORAGE, &args.to_bytes(), 0)?;
+        Ok(())
     }
 
     pub fn get_device_log(&mut self) -> Result<String, String> {
@@ -803,6 +862,9 @@ mod tests {
         upg_modes: Vec<u8>,
         /// Whether any write payload contained the `reset` shell command.
         saw_reset: bool,
+        /// Every payload passed to `write_txn`, in order (cmd header first,
+        /// then the command payload), so tests can assert exact wire bytes.
+        payloads: Vec<Vec<u8>>,
     }
 
     impl MockTransport {
@@ -833,6 +895,7 @@ mod tests {
                 panic!("mock transport must not be touched after cancellation");
             }
             self.writes += 1;
+            self.payloads.push(payload.to_vec());
             if payload.len() == 32 && payload[1..] == OFFICIAL_UPG_CFG_RESERVED {
                 self.upg_modes.push(payload[0]);
             }
@@ -916,6 +979,7 @@ mod tests {
             max_chunk: 512,
             upg_modes: Vec::new(),
             saw_reset: false,
+            payloads: Vec::new(),
         });
         let mut events = Vec::new();
         let mut cb = |e: BurnEvent| events.push(format!("{:?}", e));
@@ -945,6 +1009,7 @@ mod tests {
             max_chunk: 512,
             upg_modes: Vec::new(),
             saw_reset: false,
+            payloads: Vec::new(),
         });
         let mut progress_events = 0usize;
         let mut cb = |event: BurnEvent| {
@@ -994,6 +1059,7 @@ mod tests {
             max_chunk: 4096,
             upg_modes: Vec::new(),
             saw_reset: false,
+            payloads: Vec::new(),
         });
         dev.burn_image_with_options(&img, &metas, &options, None)
             .expect("mock burn must succeed");
@@ -1024,6 +1090,7 @@ mod tests {
             max_chunk: 4096,
             upg_modes: Vec::new(),
             saw_reset: false,
+            payloads: Vec::new(),
         });
         let mut logs = Vec::new();
         let mut cb = |e: BurnEvent| {
@@ -1042,6 +1109,100 @@ mod tests {
             logs.iter().any(|l| l.contains("skipping reset")),
             "expected a skipping-reset note, got: {:?}",
             logs
+        );
+    }
+
+    fn mock_device() -> UpgDevice<MockTransport> {
+        UpgDevice::new(MockTransport {
+            writes: 0,
+            reads: 0,
+            panic_on_use: false,
+            max_chunk: 4096,
+            upg_modes: Vec::new(),
+            saw_reset: false,
+            payloads: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn write_memory_sends_addr_len_data() {
+        let mut dev = mock_device();
+        dev.write_memory(0x41000000, &[0xAA, 0xBB]).unwrap();
+        // writes[0] = 16-byte cmd header, writes[1] = command payload.
+        assert_eq!(dev.transport_mut().payloads.len(), 2);
+        assert_eq!(
+            dev.transport_mut().payloads[1],
+            vec![0x00, 0x00, 0x00, 0x41, 0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB]
+        );
+    }
+
+    #[test]
+    fn read_memory_sends_addr_len_and_returns_len_bytes() {
+        // NOTE: len 0x10 would collide with the mock's 16-byte RESP-header
+        // special case; 0x20 exercises the generic zero-fill path.
+        let mut dev = mock_device();
+        let data = dev.read_memory(0x40000000, 0x20).unwrap();
+        assert_eq!(data, vec![0u8; 0x20]);
+        assert_eq!(
+            dev.transport_mut().payloads[1],
+            vec![0x00, 0x00, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn exec_address_sends_four_byte_addr() {
+        let mut dev = mock_device();
+        dev.exec_address(0x41000100).unwrap();
+        assert_eq!(
+            dev.transport_mut().payloads[1],
+            vec![0x00, 0x01, 0x00, 0x41]
+        );
+    }
+
+    #[test]
+    fn run_shell_rejects_overlong_commands() {
+        let mut dev = mock_device();
+        assert!(dev.run_shell(&"x".repeat(128)).is_err());
+        // Rejected before touching the transport.
+        assert!(dev.transport_mut().payloads.is_empty());
+    }
+
+    #[test]
+    fn storage_geometry_and_erase_wire_shapes() {
+        let mut dev = mock_device();
+        let media = StorageMedia::new("spi-nand", 0);
+        let geo = dev.get_storage_geometry(&media).unwrap();
+        assert_eq!(geo.total_size, 0);
+        let payloads = &dev.transport_mut().payloads;
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[1].len(), STORAGE_MEDIA_SIZE);
+        assert_eq!(&payloads[1][..9], b"spi-nand\0");
+
+        let mut dev = mock_device();
+        dev.erase_storage(&StorageEraseArgs {
+            media: StorageMedia::new("spi-nand", 0),
+            start: 0,
+            size: 0x0800_0000,
+            flag: 0,
+        })
+        .unwrap();
+        let payloads = &dev.transport_mut().payloads;
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[1].len(), STORAGE_ERASE_ARGS_SIZE);
+        assert_eq!(
+            u64::from_le_bytes(payloads[1][80..88].try_into().unwrap()),
+            0x0800_0000
+        );
+    }
+
+    #[test]
+    fn list_storage_media_parses_68_byte_chunks() {
+        let mut dev = mock_device();
+        // Mock zero-fills the 5*68-byte read: 5 empty entries (chunking
+        // math: 340/68 = 5, no partial tail).
+        assert_eq!(
+            dev.list_storage_media().unwrap(),
+            vec![StorageMedia::new("", 0); 5]
         );
     }
 }
