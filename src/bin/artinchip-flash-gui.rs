@@ -1164,6 +1164,14 @@ impl GuiApp {
         }
 
         ui.horizontal(|ui| {
+            if ui.button(self.t(Msg::OpenImage)).clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(self.t(Msg::ArtInChipImageFilter), &["img"])
+                    .pick_file()
+                {
+                    self.load_image(path);
+                }
+            }
             ui.add_enabled_ui(self.config.image_path.is_some(), |ui| {
                 if ui.button(self.t(Msg::ExtractComponents)).clicked() {
                     if let Some(image) = self.config.image_path.clone() {
