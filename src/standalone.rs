@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::build_info;
+use crate::conflicts;
 use crate::image::parser;
 use crate::uart::UartDevice;
 use crate::usb::device::AicDevice;
@@ -232,8 +233,14 @@ pub fn environment_report(image: Option<&Path>) -> String {
 
     lines.push(driver_help_text().to_string());
     lines.extend(usb_permission_hint().lines().map(str::to_string));
+    lines.push(conflicts::report());
+    lines.push(burn_stats_hint().to_string());
 
     lines.join("\n")
+}
+
+fn burn_stats_hint() -> &'static str {
+    "Burn stats: per-day success/failure counters in burn_stats.json (see `stats` command and GUI Settings)."
 }
 
 pub fn install_driver() -> Result<(), String> {

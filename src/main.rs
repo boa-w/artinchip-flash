@@ -7,10 +7,12 @@ use std::sync::{
 use std::time::Instant;
 
 use artinchip_flash::build_info;
+use artinchip_flash::burn_stats::{self, BurnOutcome};
 use artinchip_flash::device::{BurnEvent, BurnOptions, UpgDevice};
 use artinchip_flash::image;
 use artinchip_flash::official;
 use artinchip_flash::protocol::commands::FwcMeta;
+use artinchip_flash::sdcard;
 use artinchip_flash::services::{self, UartSpec};
 use artinchip_flash::standalone;
 use artinchip_flash::transport::UpgTransport;
@@ -30,7 +32,7 @@ struct Cli {
     /// Verbose transport-level logging (CBW/CSW bytes, UART framing)
     #[arg(long, global = true)]
     verbose: bool,
-    /// Machine-readable JSON output (scan, update)
+    /// Machine-readable JSON output (scan, usb-list, serial-list, stats, sd-list, update)
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -131,6 +133,15 @@ enum Commands {
     },
     /// Install platform USB access support (WinUSB INF or Linux udev rule)
     InstallUsbAccess,
+    /// Show per-day burn statistics (success/failure/cancelled)
+    Stats {
+        /// Clear all recorded statistics instead of showing them
+        #[arg(long)]
+        clear: bool,
+    },
+    /// List physical disks (read-only; for boot-card target confirmation).
+    /// Writing boot cards is not implemented — use official AiBurn for that.
+    SdList,
     /// Check for updates from GitHub Releases
     Update {
         /// Update channel: stable (default, semver `v*` releases) or nightly
@@ -190,6 +201,8 @@ fn main() {
         } => cmd_uart_monitor(port, baud, enter_upg),
         Commands::EnvCheck { image } => cmd_env_check(image),
         Commands::InstallUsbAccess => cmd_install_usb_access(),
+        Commands::Stats { clear } => cmd_stats(clear, cli.json),
+        Commands::SdList => cmd_sd_list(cli.json),
         Commands::Update { channel, open } => cmd_update(&channel, open, cli.json),
     }
 }
@@ -598,6 +611,13 @@ fn cmd_burn(flags: BurnFlags) {
         }
     }
     if let Err(e) = result {
+        // Record the outcome for `stats` before exiting (best effort only;
+        // a stats failure must not mask the burn result).
+        let outcome = burn_stats::classify_error(&e);
+        let app_dir = standalone::default_app_dir();
+        if let Err(stat_err) = burn_stats::record(&app_dir, outcome) {
+            eprintln!("Warning: could not record burn stats: {}", stat_err);
+        }
         if e.contains("cancelled") {
             eprintln!(
                 "Burn cancelled after {:.1}s (device stays in upgrade mode; retry when ready).",
@@ -607,6 +627,10 @@ fn cmd_burn(flags: BurnFlags) {
         }
         eprintln!("Burn failed after {:.1}s: {}", elapsed.as_secs_f64(), e);
         std::process::exit(1);
+    }
+
+    if let Err(e) = burn_stats::record(&standalone::default_app_dir(), BurnOutcome::Success) {
+        eprintln!("Warning: could not record burn stats: {}", e);
     }
 
     eprintln!(
@@ -741,6 +765,63 @@ fn cmd_install_usb_access() {
         Ok(()) => println!("USB access setup completed."),
         Err(e) => {
             eprintln!("USB access setup failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_stats(clear: bool, json: bool) {
+    let app_dir = standalone::default_app_dir();
+    if clear {
+        match burn_stats::clear(&app_dir) {
+            Ok(()) => println!("Burn statistics cleared."),
+            Err(e) => {
+                eprintln!("Failed to clear burn statistics: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let stats = burn_stats::load(&app_dir);
+    if json {
+        println!("{}", stats.to_json());
+    } else {
+        println!("{}", burn_stats::format_table(&stats));
+        println!("File: {}", burn_stats::stats_path(&app_dir).display());
+    }
+}
+
+fn cmd_sd_list(json: bool) {
+    match sdcard::list_disks() {
+        Ok(disks) => {
+            if json {
+                let items: Vec<serde_json::Value> = disks
+                    .iter()
+                    .map(|disk| {
+                        serde_json::json!({
+                            "id": disk.id,
+                            "model": disk.model,
+                            "size_bytes": disk.size_bytes,
+                            "bus_type": disk.bus_type,
+                            "removable": disk.removable,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::json!({ "disks": items }));
+                return;
+            }
+            if disks.is_empty() {
+                println!("No physical disks found.");
+                return;
+            }
+            println!("Physical disks (read-only; writing boot cards is not implemented):");
+            for disk in &disks {
+                println!("{}", disk.summary());
+            }
+            println!("Note: use official AiBurn to write a boot card; double-check the target id first.");
+        }
+        Err(e) => {
+            eprintln!("Failed to list physical disks: {}", e);
             std::process::exit(1);
         }
     }

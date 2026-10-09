@@ -63,7 +63,7 @@ artinchip-flash serial-list   # list serial ports usable for UART updates
 artinchip-flash info          # query connected USB device (HWINFO, storage media)
 artinchip-flash info <img>    # parse .img file header and META entries
 artinchip-flash info --uart /dev/ttyUSB0        # query a device over UART
-artinchip-flash env-check [img]        # check config, USB access, and optional image
+artinchip-flash env-check [img]        # check config, USB access, optional image, and conflicting services
 artinchip-flash install-usb-access     # install WinUSB binding or Linux udev rule
 artinchip-flash burn <img>    # burn firmware image to device over USB
 artinchip-flash burn <img> --no-reset  # burn without resetting
@@ -71,12 +71,14 @@ artinchip-flash burn <img> --uart /dev/ttyUSB0                 # burn over UART
 artinchip-flash burn <img> --uart auto --speed 1500000         # probe ports, then switch baud
 artinchip-flash uart-monitor /dev/ttyUSB0                      # interactive UART console
 artinchip-flash uart-monitor /dev/ttyUSB0 --enter-upg          # trigger upgrade mode, then monitor
+artinchip-flash stats [--clear]        # per-day burn statistics (success/failure/cancelled)
+artinchip-flash sd-list                # list physical disks read-only (boot-card target check; no writes)
 artinchip-flash update [--channel stable|nightly] [--open]      # check GitHub Releases for updates
 ```
 
 Global flags: `--verbose` (transport-level CBW/CSW + UART framing logs,
 also `ARTINCHIP_FLASH_VERBOSE=1`), `--json` (machine-readable `scan`,
-`usb-list`, `serial-list`, `update`; `update` exits `10` when newer;
+`usb-list`, `serial-list`, `stats`, `sd-list`, `update`; `update` exits `10` when newer;
 `burn` progress events carry `elapsed_secs`/`rate_bps`).
 
 `burn` shows live rate + elapsed on both CLI and GUI, and `Ctrl+C` (CLI)
@@ -103,6 +105,7 @@ Settings tab has channel + auto-check (24h throttle) + check-now.
 - [`docs/更新机制.md`](docs/更新机制.md) — 更新通道与发版流程
 - [`docs/eFuse分析与实现.md`](docs/eFuse分析与实现.md) — eFuse Bank 表、命令证据与实现状态
 - [`docs/擦写模式对照.md`](docs/擦写模式对照.md) — 数据擦写六操作与 bulk 会话的完整对照
+- [`docs/启动卡设计.md`](docs/启动卡设计.md) — 启动卡写卡风险与路线（当前仅只读枚举）
 
 ## UART firmware update
 
@@ -192,7 +195,13 @@ Implemented GUI features:
   and pre-burn full-chip erase via the official `upgcmd flasherase` backend
   (GUI checkboxes, CLI `--force-upgrade` / `--erase-all`).
 - Standalone environment check for USB access, config directory writability,
-  selected image parsing, and driver readiness.
+  selected image parsing, driver readiness, and conflicting-service detection
+  (Windows `sc query` for VMware/VirtualBox USB holders with manual fix hints).
+- Burn statistics: per-day success/failure/cancelled counters in
+  `burn_stats.json`, shown in the Settings tab and via CLI `stats`.
+- Read-only physical-disk probe for boot-card target confirmation
+  (CLI `sd-list`, Tools page button; writing boot cards still needs official
+  AiBurn, see `docs/启动卡设计.md`).
 - Built-in USB access setup: Windows WinUSB INF installation through `pnputil`,
   Linux udev rule installation, and macOS no-driver status reporting.
 - Settings compatible with the original `AiBurn.ini` fields:

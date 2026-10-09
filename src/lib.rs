@@ -1,10 +1,13 @@
 pub mod app_config;
 pub mod build_info;
+pub mod burn_stats;
+pub mod conflicts;
 pub mod device;
 pub mod i18n;
 pub mod image;
 pub mod official;
 pub mod protocol;
+pub mod sdcard;
 pub mod services;
 pub mod standalone;
 pub mod transport;

@@ -13,9 +13,11 @@ use artinchip_flash::app_config::{
     append_image_history, compat_tool_path, load_image_history, AppConfig,
 };
 use artinchip_flash::build_info;
+use artinchip_flash::burn_stats::{self, BurnOutcome};
 use artinchip_flash::i18n::{command_label, tr, Language, Msg};
 use artinchip_flash::image::parser::{self, ImageSummary, MetaSummary};
 use artinchip_flash::official::{self, OfficialArgs, OfficialCommand};
+use artinchip_flash::sdcard;
 use artinchip_flash::services::{self, UartSpec};
 use artinchip_flash::standalone;
 use artinchip_flash::update::{self, UpdateChannel};
@@ -92,6 +94,9 @@ struct GuiApp {
     overall_sent: usize,
     overall_total: usize,
     burn_rate_bps: f64,
+    burn_failed: bool,
+    burn_error: Option<String>,
+    worker_is_burn: bool,
     auto_started_for_device: bool,
     rx: Option<Receiver<WorkerEvent>>,
     scan_rx: Option<Receiver<DeviceScanResult>>,
@@ -140,6 +145,9 @@ impl GuiApp {
             overall_sent: 0,
             overall_total: 0,
             burn_rate_bps: 0.0,
+            burn_failed: false,
+            burn_error: None,
+            worker_is_burn: false,
             auto_started_for_device: false,
             rx: None,
             scan_rx: None,
@@ -559,6 +567,9 @@ impl GuiApp {
         self.overall_sent = 0;
         self.overall_total = 0;
         self.burn_rate_bps = 0.0;
+        self.burn_failed = false;
+        self.burn_error = None;
+        self.worker_is_burn = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(cancel.clone());
         self.burn_started_at = Some(Instant::now());
@@ -709,6 +720,7 @@ impl GuiApp {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.busy = true;
+        self.worker_is_burn = false;
         thread::spawn(move || {
             let result = (|| -> Result<String, String> {
                 if use_uart {
@@ -763,6 +775,7 @@ impl GuiApp {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.busy = true;
+        self.worker_is_burn = false;
         self.log(format!(
             "{}: {} {}",
             self.t(Msg::RunCommand),
@@ -780,6 +793,54 @@ impl GuiApp {
             }
             let _ = tx.send(WorkerEvent::Done);
         });
+    }
+
+    fn start_sd_list(&mut self) {
+        if self.busy {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.busy = true;
+        self.worker_is_burn = false;
+        self.log(self.t(Msg::SdListNote));
+        thread::spawn(move || {
+            match sdcard::list_disks() {
+                Ok(disks) => {
+                    let mut text = String::from(
+                        "Physical disks (read-only; writing boot cards is not implemented):\n",
+                    );
+                    if disks.is_empty() {
+                        text.push_str("No physical disks found.\n");
+                    }
+                    for disk in &disks {
+                        text.push_str(&disk.summary());
+                        text.push('\n');
+                    }
+                    text.push_str(
+                        "Note: use official AiBurn to write a boot card; double-check the target id first.\n",
+                    );
+                    let _ = tx.send(WorkerEvent::ToolOutput(text));
+                }
+                Err(e) => {
+                    let _ = tx.send(WorkerEvent::Error(e));
+                }
+            }
+            let _ = tx.send(WorkerEvent::Done);
+        });
+    }
+
+    fn record_burn_stats(&mut self) {
+        let outcome = if !self.burn_failed {
+            BurnOutcome::Success
+        } else if let Some(err) = &self.burn_error {
+            burn_stats::classify_error(err)
+        } else {
+            BurnOutcome::Failure
+        };
+        if let Err(e) = burn_stats::record(&self.config.app_dir, outcome) {
+            self.log(format!("Warning: could not record burn stats: {}", e));
+        }
     }
 
     fn poll_worker(&mut self, ctx: &egui::Context) {
@@ -809,12 +870,21 @@ impl GuiApp {
                         }
                     }
                     WorkerEvent::Error(e) => {
+                        if self.worker_is_burn {
+                            self.burn_failed = true;
+                            self.burn_error = Some(e.clone());
+                        }
                         self.log_error(e);
                     }
                     WorkerEvent::Done => {
+                        let was_burn = self.worker_is_burn;
                         self.busy = false;
                         self.cancel_flag = None;
+                        self.worker_is_burn = false;
                         done = true;
+                        if was_burn {
+                            self.record_burn_stats();
+                        }
                     }
                 }
                 ctx.request_repaint();
@@ -1548,6 +1618,23 @@ impl GuiApp {
                 }
             }
         });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!self.busy, |ui| {
+                if ui.button(self.t(Msg::SdList)).clicked() {
+                    self.start_sd_list();
+                }
+            });
+            ui.label(
+                egui::RichText::new(match self.lang() {
+                    Language::ZhCn => "只读枚举启动卡目标盘；写卡仍需官方 AiBurn（见启动卡设计文档）",
+                    Language::En => {
+                        "Read-only boot-card target probe; writing still needs official AiBurn (see boot-card design doc)"
+                    }
+                })
+                .small()
+                .weak(),
+            );
+        });
     }
 
     fn ui_official_args(&mut self, ui: &mut egui::Ui) {
@@ -1778,6 +1865,8 @@ impl GuiApp {
         ui.checkbox(&mut self.config.read_device_log, read_device_log);
         verbosity::set_verbose(self.config.verbose);
         ui.separator();
+        self.ui_burn_stats(ui);
+        ui.separator();
         self.ui_update_settings(ui);
         ui.horizontal(|ui| {
             if ui.button(self.t(Msg::LoadAiBurnIni)).clicked() {
@@ -1802,6 +1891,82 @@ impl GuiApp {
                 }
             }
         });
+    }
+
+    fn ui_burn_stats(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(self.t(Msg::BurnStats));
+            if ui.button(self.t(Msg::Refresh)).clicked() {
+                // Stats are read fresh on every frame; just repaint.
+                ui.ctx().request_repaint();
+            }
+            if ui.button(self.t(Msg::ClearStats)).clicked() {
+                match burn_stats::clear(&self.config.app_dir) {
+                    Ok(()) => self.log(self.t(Msg::ClearStats)),
+                    Err(e) => self.log_error(e),
+                }
+            }
+        });
+        let stats = burn_stats::load(&self.config.app_dir);
+        if stats.days.is_empty() {
+            ui.label(match self.lang() {
+                Language::ZhCn => "暂无烧写统计，完成一次烧录后自动计数。",
+                Language::En => "No burn statistics yet; counted automatically after a burn.",
+            });
+            return;
+        }
+        egui::Grid::new("burn_stats_grid")
+            .striped(true)
+            .min_col_width(70.0)
+            .show(ui, |ui| {
+                ui.label(match self.lang() {
+                    Language::ZhCn => "日期",
+                    Language::En => "date",
+                });
+                ui.label(match self.lang() {
+                    Language::ZhCn => "成功",
+                    Language::En => "success",
+                });
+                ui.label(match self.lang() {
+                    Language::ZhCn => "失败",
+                    Language::En => "failure",
+                });
+                ui.label(match self.lang() {
+                    Language::ZhCn => "取消",
+                    Language::En => "cancelled",
+                });
+                ui.label(match self.lang() {
+                    Language::ZhCn => "成功率",
+                    Language::En => "rate",
+                });
+                ui.end_row();
+                for (date, day) in &stats.days {
+                    ui.monospace(date);
+                    ui.label(day.success.to_string());
+                    ui.label(day.failure.to_string());
+                    ui.label(day.cancelled.to_string());
+                    ui.label(
+                        day.success_rate()
+                            .map(|r| format!("{:.1}%", r * 100.0))
+                            .unwrap_or_else(|| "--".to_string()),
+                    );
+                    ui.end_row();
+                }
+            });
+        let total = stats.total();
+        ui.label(format!(
+            "{}: {} / {} ({})",
+            match self.lang() {
+                Language::ZhCn => "累计",
+                Language::En => "total",
+            },
+            total.success,
+            total.success + total.failure,
+            total
+                .success_rate()
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "--".to_string()),
+        ));
     }
 
     fn ui_update_settings(&mut self, ui: &mut egui::Ui) {

@@ -171,6 +171,10 @@ pub enum Msg {
     SaveLog,
     LogCopied,
     LogSavedTo,
+    BurnStats,
+    ClearStats,
+    SdList,
+    SdListNote,
 }
 
 pub fn tr(lang: Language, msg: Msg) -> &'static str {
@@ -365,6 +369,10 @@ fn zh_cn(msg: Msg) -> &'static str {
         Msg::SaveLog => "保存日志",
         Msg::LogCopied => "日志已复制到剪贴板",
         Msg::LogSavedTo => "日志已保存到",
+        Msg::BurnStats => "烧写统计（按天）",
+        Msg::ClearStats => "清空统计",
+        Msg::SdList => "列出物理磁盘（只读）",
+        Msg::SdListNote => "正在枚举物理磁盘（只读，不会写入）…",
     }
 }
 
@@ -516,6 +524,10 @@ fn en(msg: Msg) -> &'static str {
         Msg::SaveLog => "Save log",
         Msg::LogCopied => "Log copied to clipboard",
         Msg::LogSavedTo => "Log saved to",
+        Msg::BurnStats => "Burn statistics (per day)",
+        Msg::ClearStats => "Clear stats",
+        Msg::SdList => "List physical disks (read-only)",
+        Msg::SdListNote => "Enumerating physical disks (read-only, no writes)…",
     }
 }
 
@@ -536,6 +548,10 @@ mod tests {
                 Msg::SaveLog,
                 Msg::LogCopied,
                 Msg::LogSavedTo,
+                Msg::BurnStats,
+                Msg::ClearStats,
+                Msg::SdList,
+                Msg::SdListNote,
                 Msg::Stop,
                 Msg::Rate,
                 Msg::Elapsed,

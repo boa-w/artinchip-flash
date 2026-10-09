@@ -28,6 +28,9 @@
 | **全片擦除**开关（烧录页） | CLI `--erase-all/--erase-media/--upgcmd-path` / GUI 全片擦除复选框 + 介质框 | 烧录前经官方 `upgcmd flasherase` 擦除（原生擦除命令未经逆向确认，不猜协议）；介质缺省取镜像 `media_dev_id`，透传 `--dev/--uart/--baudrate` |
 | **强制升级**选项（与重启互斥） | CLI `--force-upgrade` / GUI 强制升级复选框（`BurnOptions.force_upgrade`） | `SET_UPG_CFG` 改发 `BURN_IMG_FORCE`（0x04）且跳过烧后复位；实验性，需设备端开强制升级开关（官方手册 §2.1.4），无硬件验证 |
 | 日志复制与落盘 | GUI 复制/保存按钮 + CLI `burn --log-file` | 复用 `services::{default_log_path, write_log_file}`，默认 `logs/artinchip-flash-<UTC时间>.log`；日志窗文本可框选 |
+| **烧写统计**（按天成功/失败/成功率） | CLI `stats`（`--json`/`--clear`）/ GUI 设置页表格 | `burn_stats.json` 按天计数（成功/失败/取消，取消单列、成功率只计成功+失败），CLI/GUI 烧录完成自动记一笔；`show_statistic/db_inited` 键照常兼容读入回存 |
+| 环境检测：冲突服务（VMware USB 等） | `env-check` / 工具页环境检查 | Windows 解析 `sc query` 抓 VMware/USB 仲裁类服务并给出 `sc stop/config disabled` 手动命令（需管理员，不自动停）；Linux/macOS 经 `pgrep` 提示等效释放步骤 |
+| 物理磁盘只读枚举（启动卡目标确认） | CLI `sd-list`（`--json`）/ 工具页只读按钮 | Linux `/sys/block`、Windows `Get-Disk`+`wmic` 兜底、macOS `diskutil list`；写卡未实现（见《启动卡设计》），需官方 AiBurn 写卡 |
 
 协议层（`aicupg_cmd_*`）已覆盖烧录/查询/内存/分区/日志/串口参数/JTAG 相关命令字；
 文件类操作（`write_file/read_file/delete_file/storage_erase`）复用
@@ -42,13 +45,13 @@
 | 1 | 烧录**速率/用时**显示、**停止**（中止烧写） | 已实现（见上表） | 后续仅做文案/样式微调 |
 | 2 | **全片擦除**开关（烧录页） | 已实现（见上表；经 `upgcmd` 前置擦除） | 原生擦除命令确认前保持透传方案，不猜协议 |
 | 3 | **强制升级**选项（与重启互斥） | 已实现（见上表；实验性，无硬件验证） | 待真机验证后去实验性标注 |
-| 4 | **制作启动卡**（SD 枚举/GPT-MBR/格式化/MMC 镜像写卡，需管理员） | 未实现 | P2：跨平台裸盘写入工作量大（Windows `\\.\PhysicalDriveN` + GPT），先出设计文档；CLI 先做 `sd-list` 只读枚举 |
+| 4 | **制作启动卡**（SD 枚举/GPT-MBR/格式化/MMC 镜像写卡，需管理员） | 部分实现：只读枚举已落地（`sd-list` + 设计文档《启动卡设计》） | 写卡保持未实现：裸盘写入（Windows `\\.\PhysicalDriveN` + GPT）与官方布局确认前不猜协议；写卡需官方 AiBurn，写前用 `sd-list` 核对 |
 | 5 | **数据擦写**页（进擦写模式、擦除 Boot、读/擦/写数据） | 部分实现（见《擦写模式对照》） | eFuse 读写与 `bdreboot` 已透传；进擦写模式与 bulk 读/擦/写（`bdopen/bdcfg/bdread/bdwrite/bderase/bdclose`）线格式未知，需抓包确认，不猜协议 |
 | 6 | eFuse 读/烧录（含 Bank 表与 U-Boot `efuse` 语法） | 已实现（见上表；`bdefuse`/`auzwritefuse` 透传 + Bank 表文档） | 原生 `bd_efuse_read/write` 会话待与 #5 一并抓包确认 |
 | 7 | **Agent 服务**（TCP 9100、串口监听推送、技能包 `burn/readlog/getstatus/sendcmd`） | 未实现 | P2：独立服务模块 + JSON 线协议文档；技能包放 `skill/` 目录 |
-| 8 | **烧写统计**（按天成功/失败/成功率） | 仅保留 `show_statistic/db_inited` 键 | P2：`burn_stats.json` 按天计数 + 设置页表格（无额外依赖，`serde_json` 已有） |
+| 8 | **烧写统计**（按天成功/失败/成功率） | 已实现（见上表） | 后续仅做文案/样式微调；损坏文件按空统计加载，不阻塞烧录 |
 | 9 | 按次 `.log` 文件落盘 | 已实现（见上表） | GUI 复制/保存按钮 + CLI `burn --log-file`，复用 `services::write_log_file` |
-| 10 | 环境检测：冲突服务（VMware USB 等）**停止并禁用** | 仅配置/USB/镜像检查 | P2：Windows 服务枚举（`sc query`）+ 提权停用；Linux/macOS 给等效提示 |
+| 10 | 环境检测：冲突服务（VMware USB 等）**停止并禁用** | 已实现检测+手动修复提示（见上表；本机已验证可检出运行中的 VMware USB Arbitration Service） | 保持“只检测、不自动停用”：停用需提权且影响运行中的虚拟机，由用户手动执行；Linux/macOS 给等效释放提示 |
 | 11 | WHQL 签名驱动（`.cat`） | 自生成未签名 INF | 如实告知：签名需厂商证书，个人开源项目无法提供；企业用户可自行签名后替换 `driver/` 目录 |
 | 12 | 随包 updater 固件（`bin/fw_d1xx.bin`） | 使用镜像内嵌 updater 组件 | 等效：官方内置 updater 只是兜底，镜像内 updater 优先；暂不打包 |
 
