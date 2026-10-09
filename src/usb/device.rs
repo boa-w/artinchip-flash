@@ -21,6 +21,22 @@ const BULK_OUT_EP: u8 = 0x02;
 const BULK_IN_EP: u8 = 0x81;
 const TIMEOUT_MS: Duration = Duration::from_secs(30);
 const SHORT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Bulk-transfer ceiling, overridable for fast failure while debugging:
+/// `ARTINCHIP_FLASH_TIMEOUT_MS` (milliseconds, floor 500ms, default 30000).
+/// Short timeouts only change how long we wait, never the wire bytes.
+fn bulk_timeout() -> Duration {
+    parse_timeout_ms(std::env::var("ARTINCHIP_FLASH_TIMEOUT_MS").ok().as_deref())
+}
+
+/// Pure parser for [`bulk_timeout`] (kept separate so unit tests don't have
+/// to mutate the process-global environment).
+fn parse_timeout_ms(var: Option<&str>) -> Duration {
+    var.and_then(|text| text.trim().parse::<u64>().ok())
+        .map(|ms| ms.max(500))
+        .map(Duration::from_millis)
+        .unwrap_or(TIMEOUT_MS)
+}
 const BULK_WRITE_CHUNK: usize = 64 * 1024;
 const RECONNECT_SETTLE_DELAY: Duration = Duration::from_millis(120);
 const START_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -439,7 +455,7 @@ impl UsbTransport {
         );
         self.write_bulk(cbw.to_bytes())?;
 
-        let data = self.read_exact_from_in(read_len as usize, TIMEOUT_MS)?;
+        let data = self.read_exact_from_in(read_len as usize, bulk_timeout())?;
         log_verbose!("  << DATA {} bytes", data.len());
 
         let csw = self.read_csw(tag, policy)?;
@@ -459,7 +475,7 @@ impl UsbTransport {
     }
 
     fn write_bulk(&self, data: &[u8]) -> Result<(), String> {
-        self.write_bulk_with_timeout(data, TIMEOUT_MS)
+        self.write_bulk_with_timeout(data, bulk_timeout())
     }
 
     fn write_bulk_with_timeout(&self, data: &[u8], timeout: Duration) -> Result<(), String> {
@@ -525,7 +541,7 @@ impl UsbTransport {
                 ));
             }
             let remaining = deadline.saturating_duration_since(now);
-            match self.read_bulk_to_buffer(remaining.min(TIMEOUT_MS)) {
+            match self.read_bulk_to_buffer(remaining.min(bulk_timeout())) {
                 Ok(0) => {}
                 Ok(n) => log_verbose!(
                     "  << DATA buffered {} bytes (buffer={}/{})",
@@ -574,7 +590,7 @@ impl UsbTransport {
             + if policy == CswPolicy::AllowMissing {
                 SHORT_TIMEOUT
             } else {
-                TIMEOUT_MS
+                bulk_timeout()
             };
         loop {
             if let Some(pos) = self.find_csw_signature() {
@@ -1097,4 +1113,21 @@ fn format_usb_open_error(err: rusb::Error, _address: u8) -> String {
         }
     }
     format!("{}", err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_override_parses_and_floors() {
+        assert_eq!(parse_timeout_ms(None), TIMEOUT_MS);
+        assert_eq!(parse_timeout_ms(Some("5000")), Duration::from_millis(5000));
+        assert_eq!(parse_timeout_ms(Some(" 2000 ")), Duration::from_millis(2000));
+        // Floor, garbage and empty fall back (never fail the transfer path).
+        assert_eq!(parse_timeout_ms(Some("0")), Duration::from_millis(500));
+        assert_eq!(parse_timeout_ms(Some("100")), Duration::from_millis(500));
+        assert_eq!(parse_timeout_ms(Some("nope")), TIMEOUT_MS);
+        assert_eq!(parse_timeout_ms(Some("")), TIMEOUT_MS);
+    }
 }
